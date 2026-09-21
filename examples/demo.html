@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scanner-clock demo</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #17181c; --muted: #6b7280; --line: #e5e7eb;
+    --accent: #2563eb; --warn: #b45309; --ok: #047857; --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e8eaed; --muted: #9aa1ad; --line: #272b33;
+      --accent: #7aa2ff; --warn: #f0b429; --ok: #4ade80; --panel: #161920;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  button { font: inherit; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  #stage {
+    display: grid; place-items: center; min-height: 160px; font-size: 40px;
+    border: 1px solid var(--line); border-radius: 10px; margin-bottom: 16px;
+  }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; }
+  .stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  #log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 220px; overflow: auto; white-space: pre; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>scanner-clock demo</h1>
+  <p class="sub">
+    Press <kbd>5</kbd> to send a volume pulse by hand, or tick “faux fives” to
+    generate them locally. The task advances only on pulses.
+  </p>
+
+  <div id="stage">—</div>
+
+  <div class="panel row">
+    <button id="run">Run 6 trials</button>
+    <button id="stop" disabled>Stop</button>
+    <label><input type="checkbox" id="faux"> faux fives (local generator)</label>
+    <label>TR <input type="number" id="tr" value="1000" min="100" step="100" style="width:80px"> ms</label>
+  </div>
+
+  <div class="panel stats">
+    <div class="stat"><b id="s-volume">0</b><span>volume</span></div>
+    <div class="stat"><b id="s-real">0</b><span>real pulses</span></div>
+    <div class="stat"><b id="s-faux">0</b><span>faux pulses</span></div>
+    <div class="stat"><b id="s-hidden">0</b><span>hidden ms</span></div>
+  </div>
+
+  <div class="panel"><div id="log">waiting…</div></div>
+</main>
+
+<script src="../dist/scanner-clock.umd.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var stage = document.getElementById('stage');
+  var logEl = document.getElementById('log');
+  var lines = [];
+  var clock = null;
+  var running = false;
+
+  function log(msg, cls) {
+    lines.push('<span class="' + (cls || '') + '">' + msg + '</span>');
+    if (lines.length > 200) lines.shift();
+    logEl.innerHTML = lines.join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function refresh() {
+    if (!clock) return;
+    var s = clock.snapshot();
+    document.getElementById('s-volume').textContent = s.volume;
+    document.getElementById('s-real').textContent = s.realPulses;
+    document.getElementById('s-faux').textContent = s.fauxPulses;
+    document.getElementById('s-hidden').textContent = Math.round(s.hiddenMs);
+  }
+
+  function build() {
+    if (clock) clock.destroy({ settle: 'resolve' });
+    var trMs = Number(document.getElementById('tr').value) || 1000;
+    clock = ScannerClock.create({
+      trMs: trMs,
+      // guardMs must be smaller than the TR; scale it so the demo's TR slider
+      // cannot produce an invalid pair.
+      guardMs: Math.min(500, Math.round(trMs * 0.3)),
+      fauxFives: document.getElementById('faux').checked,
+      logPulses: true,
+      onLog: function (event, data) {
+        if (event === 'pulse') { refresh(); return; }
+        log(event + ' ' + JSON.stringify(data), event === 'double_clock_warning' ? 'warn' : '');
+        refresh();
+      },
+    });
+    return clock;
+  }
+
+  document.getElementById('run').addEventListener('click', function () {
+    if (running) return;
+    runDemo().catch(function (err) {
+      // A hold() on a destroyed clock rejects; so does a bad config. Either way
+      // the operator should see it rather than a screen that never advances.
+      log(String(err && err.message || err), 'warn');
+      stage.textContent = 'error';
+      running = false;
+      document.getElementById('run').disabled = false;
+      document.getElementById('stop').disabled = true;
+    });
+  });
+
+  async function runDemo() {
+    running = true;
+    lines = [];
+    document.getElementById('run').disabled = true;
+    document.getElementById('stop').disabled = false;
+
+    var c = build();
+    c.start();                                  // no-op unless faux is ticked
+
+    stage.textContent = 'waiting for pulse…';
+    await c.awaitRunStart({ run: 'demo' });
+
+    stage.textContent = '+';
+    await c.hold(c.volumesToMs(2), { label: 'burn-in' });
+
+    for (var i = 1; i <= 6 && running; i++) {
+      var onset = c.count;
+      stage.textContent = '◆ ' + i;
+      await c.hold(c.trMs, { label: 'stim' });
+      stage.textContent = '+';
+      await c.hold(c.trMs * (1 + (i % 3)), { label: 'iti' });
+      log('trial ' + i + ' onset v' + onset + ' → v' + c.count, 'ok');
+    }
+
+    stage.textContent = 'done';
+    log('snapshot ' + JSON.stringify(c.snapshot(), null, 1), 'ok');
+    c.stop();
+    running = false;
+    document.getElementById('run').disabled = false;
+    document.getElementById('stop').disabled = true;
+  }
+
+  document.getElementById('stop').addEventListener('click', function () {
+    running = false;
+    if (clock) clock.destroy({ settle: 'resolve' });
+    stage.textContent = 'stopped';
+    document.getElementById('run').disabled = false;
+    document.getElementById('stop').disabled = true;
+  });
+})();
+</script>
+</body>
+</html>

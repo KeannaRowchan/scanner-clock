@@ -1,0 +1,40 @@
+{
+  "name": "scanner-clock",
+  "version": "0.1.0",
+  "description": "fMRI trigger clock for browser-based tasks: advance your task on the scanner's volume pulses instead of setTimeout, so timing cannot drift.",
+  "keywords": [
+    "fmri", "neuroimaging", "scanner", "trigger", "tr", "psychophysics",
+    "jspsych", "psychojs", "timing", "experiment", "cognitive-neuroscience"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/scanner-clock.cjs",
+  "module": "./src/scanner-clock.js",
+  "browser": "./dist/scanner-clock.umd.js",
+  "unpkg": "./dist/scanner-clock.umd.js",
+  "jsdelivr": "./dist/scanner-clock.umd.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/scanner-clock.js",
+      "require": "./dist/scanner-clock.cjs",
+      "default": "./dist/scanner-clock.cjs"
+    },
+    "./umd": "./dist/scanner-clock.umd.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["src", "dist", "types", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "check": "npm run build && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/OWNER/scanner-clock.git" },
+  "bugs": { "url": "https://github.com/OWNER/scanner-clock/issues" },
+  "homepage": "https://github.com/OWNER/scanner-clock#readme",
+  "publishConfig": { "access": "public" }
+}
