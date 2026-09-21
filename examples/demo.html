@@ -54,7 +54,16 @@
     <button id="run">Run 6 trials</button>
     <button id="stop" disabled>Stop</button>
     <label><input type="checkbox" id="faux"> faux fives (local generator)</label>
-    <label>TR <input type="number" id="tr" value="1000" min="100" step="100" style="width:80px"> ms</label>
+    <label>TR
+      <select id="tr">
+        <option value="0.5">0.5 s</option>
+        <option value="1" selected>1 s</option>
+        <option value="1.5">1.5 s</option>
+        <option value="2">2 s</option>
+        <option value="2.5">2.5 s</option>
+        <option value="3">3 s</option>
+      </select>
+    </label>
   </div>
 
   <div class="panel stats">
@@ -97,9 +106,11 @@
   function build() {
     if (clock) clock.destroy({ settle: 'resolve' });
     clock = ScannerClock.create({
-      trMs: Number(document.getElementById('tr').value) || 1000,
-      // No guardMs here: it defaults to min(500, trMs / 2), so the TR box
-      // cannot produce an invalid pair.
+      // Whole or half seconds only — the TR box offers nothing else, and
+      // create() would reject it if it did.
+      trSec: Number(document.getElementById('tr').value) || 1,
+      // No guardMs here: it defaults to min(500, trMs / 2), so no TR on the
+      // list can produce an invalid pair.
       pulseTimeoutMs: 8000,
       fauxFives: document.getElementById('faux').checked,
       logPulses: true,
@@ -138,14 +149,14 @@
     await c.awaitRunStart({ run: 'demo' });
 
     stage.textContent = '+';
-    await c.hold(c.volumesToMs(2), { label: 'burn-in' });
+    await c.holdVolumes(2, { label: 'burn-in' });
 
     for (var i = 1; i <= 6 && running; i++) {
       var onset = c.count;
       stage.textContent = '◆ ' + i;
-      await c.hold(c.trMs, { label: 'stim' });
+      await c.holdVolumes(1, { label: 'stim' });
       stage.textContent = '+';
-      await c.hold(c.trMs * (1 + (i % 3)), { label: 'iti' });
+      await c.holdVolumes(1 + (i % 3), { label: 'iti' });
       log('trial ' + i + ' onset v' + onset + ' → v' + c.count, 'ok');
     }
 

@@ -29,9 +29,13 @@
  *
  * FAUX FIVES
  *   fauxFives:true runs a local generator that dispatches a real KeyboardEvent
- *   on the same interval, for behavioural piloting. It deliberately does NOT
- *   call the handler directly, so faux and real drive the IDENTICAL code path —
- *   a behavioural pilot therefore tests the timing logic the scanner will run.
+ *   at the TR, for behavioural piloting. It deliberately does NOT call the
+ *   handler directly, so faux and real drive the IDENTICAL code path — a
+ *   behavioural pilot therefore tests the timing logic the scanner will run.
+ *
+ *   The same generator is available on its own as simulate(trSec), which just
+ *   presses "5" at the TR and can stand in for the scanner in front of ANY
+ *   task, including ones that have never heard of this module.
  *
  *   fauxFives:false (the default) runs the clock off real presses only: the
  *   scanner's pulses, or a human pressing "5" to step through by hand.
@@ -44,11 +48,13 @@
  *      every visibility change and totals the hidden time in snapshot(): check
  *      hiddenMs before trusting a run's timing. Fullscreen makes it unlikely.
  *   2. Blocking work. A long synchronous task (e.g. building a trial plan)
- *      blocks the thread. Missed setInterval callbacks are COALESCED, so the
- *      FAUX generator loses pulses across a block; a real scanner's keydown
- *      events are QUEUED and delivered afterwards, so it does not. Do blocking
- *      setup before the first run, and measure drift within runs, not across
- *      the whole session.
+ *      blocks the thread, and no timer of any kind fires while it does. The
+ *      generator keeps an ABSOLUTE schedule and emits every pulse the wall
+ *      clock says is due once the thread frees up, which is what a real scanner
+ *      does to a busy task — it keeps pulsing, and the queued keydowns arrive
+ *      late and in a burst. So a block stretches a screen in the pilot exactly
+ *      as it would in the scanner, rather than quietly costing a pulse. Still
+ *      do blocking setup before the first run.
  * ========================================================================== */
 
 const VERSION = '0.1.0';
@@ -56,6 +62,8 @@ const VERSION = '0.1.0';
 const DEFAULTS = {
   // --- the scanner ---------------------------------------------------------
   trMs: 1000,             // ms per volume. NOTHING else assumes 1s.
+  trSec: null,            // the same thing in seconds; give one or the other
+  trStepMs: 500,          // TR granularity: whole or half seconds. 0 = anything.
   key: '5',               // key, or array of keys, the scanner sends
   pulsesPerVolume: 1,     // raise it if your sequence pulses per slice or echo
   dummyVolumes: 0,        // volumes awaitRunStart() waits out before the run
@@ -81,11 +89,70 @@ const DEFAULTS = {
 
 const ROUNDERS = { round: Math.round, floor: Math.floor, ceil: Math.ceil };
 
+const nowMs = () =>
+  (typeof performance === 'object' && performance && typeof performance.now === 'function')
+    ? performance.now()
+    : Date.now();
+
+/**
+ * The TR comes off a protocol printout, and it is the one number that makes
+ * every other number in the task wrong if it is entered wrong. So it is checked
+ * against a granularity: whole or half seconds by default, matching how TRs are
+ * actually prescribed. Set trStepMs: 0 (or 100, or whatever) if your sequence
+ * genuinely runs at something else.
+ */
+function resolveTrMs(given) {
+  const hasMs = given.trMs !== undefined && given.trMs !== null;
+  const hasSec = given.trSec !== undefined && given.trSec !== null;
+  if (hasMs && hasSec) {
+    throw new Error('scanner-clock: give trMs or trSec, not both');
+  }
+
+  let trMs = hasSec ? given.trSec * 1000 : (hasMs ? given.trMs : DEFAULTS.trMs);
+  if (!(trMs > 0) || !Number.isFinite(trMs)) {
+    throw new Error('scanner-clock: ' + (hasSec ? 'trSec' : 'trMs') +
+      ' must be a positive number');
+  }
+
+  const stepGiven = given.trStepMs !== undefined && given.trStepMs !== null;
+  const step = stepGiven ? given.trStepMs : DEFAULTS.trStepMs;
+
+  // Each input is guarded against the other one's units, because that is the
+  // mistake that produces a working clock at a wildly wrong rate.
+  //
+  // 2 is a plausible TR in seconds and an impossible one in milliseconds. Only
+  // worth saying when the granularity is at its default: someone who has set
+  // trStepMs is deliberately off the beaten path and knows the units.
+  if (hasMs && !stepGiven && trMs < 50) {
+    throw new Error('scanner-clock: trMs is in MILLISECONDS — ' + given.trMs +
+      'ms is not a TR. Did you mean trSec: ' + given.trMs + '?');
+  }
+  // And 2000 is a plausible TR in milliseconds and an impossible one in seconds.
+  if (hasSec && given.trSec > 30) {
+    throw new Error('scanner-clock: trSec is in SECONDS — ' + given.trSec +
+      's is not a TR. Did you mean trMs: ' + given.trSec + '?');
+  }
+
+  if (!(step >= 0) || !Number.isFinite(step)) {
+    throw new Error('scanner-clock: trStepMs must be zero or positive');
+  }
+
+  if (step > 0 && Math.abs(trMs / step - Math.round(trMs / step)) > 1e-9) {
+    const low = Math.floor(trMs / step) * step;
+    const high = low + step;
+    throw new Error('scanner-clock: a TR of ' + (trMs / 1000) + 's is not a multiple of ' +
+      (step / 1000) + 's. Nearest allowed: ' + (low / 1000) + 's or ' + (high / 1000) +
+      's. Set trStepMs if your sequence really runs at ' + (trMs / 1000) + 's.');
+  }
+  return trMs;
+}
+
 // Aliases people reach for. They are REJECTED, not silently accepted: a typo in
 // trMs would otherwise leave the task running at the 1000ms default while the
 // scanner ran at a different TR, and nothing would look wrong.
 const OPTION_HINTS = {
-  tr: 'trMs', trms: 'trMs', trsec: 'trMs', trseconds: 'trMs', repetitiontime: 'trMs',
+  tr: 'trSec', trms: 'trMs', trseconds: 'trSec', repetitiontime: 'trSec',
+  trs: 'trSec', trsecs: 'trSec', trstep: 'trStepMs',
   guard: 'guardMs', guardms: 'guardMs',
   triggerkey: 'key', scannerkey: 'key', keys: 'key',
   faux: 'fauxFives', dummy: 'dummyVolumes', dummies: 'dummyVolumes',
@@ -106,6 +173,76 @@ function destroyedError() {
   const err = new Error('scanner-clock: clock destroyed while waiting');
   err.name = 'ScannerClockDestroyedError';
   return err;
+}
+
+function makeKeyEvent(key) {
+  const init = {
+    key,
+    code: key.length === 1 && key >= '0' && key <= '9'
+      ? 'Digit' + key
+      : 'Key' + key.toUpperCase(),
+    bubbles: true,
+  };
+  if (typeof globalThis !== 'undefined' && typeof globalThis.KeyboardEvent === 'function') {
+    return new globalThis.KeyboardEvent('keydown', init);
+  }
+  // Non-DOM host (tests, Node): a plain object carries everything we read.
+  return Object.assign({ type: 'keydown', isTrusted: false, target: null }, init);
+}
+
+/**
+ * A pulse train that keeps to an ABSOLUTE schedule: pulse n is due at
+ * t0 + n*TR, and each timeout is measured back to t0 rather than to the
+ * previous pulse. setInterval cannot do this — its error accumulates, so a
+ * 1000ms interval that actually fires at 1004ms is 4 seconds late by the end of
+ * a 1000-volume run.
+ *
+ * When the thread has been blocked, every pulse the wall clock says is due is
+ * emitted, rather than the missed ones being dropped. That is what a real
+ * scanner does to a busy task: it keeps pulsing, and the browser delivers the
+ * queued keydowns late and in a burst. A faux generator that quietly skipped
+ * them would make a pilot run look better than the scanner run it stands in for.
+ */
+function makeTicker(trMs, onTick) {
+  const t0 = nowMs();
+  let ticks = 0;
+  let handle = null;
+  let stopped = false;
+  let lastDriftMs = 0;
+  let maxAbsDriftMs = 0;
+
+  function schedule() {
+    if (stopped) return;
+    handle = setTimeout(fire, Math.max(0, t0 + (ticks + 1) * trMs - nowMs()));
+    if (typeof handle === 'object' && handle !== null && typeof handle.unref === 'function') {
+      handle.unref();
+    }
+  }
+
+  function fire() {
+    if (stopped) return;
+    const due = Math.max(1, Math.floor((nowMs() - t0) / trMs) - ticks);
+    for (let i = 0; i < due && !stopped; i++) {
+      ticks++;
+      lastDriftMs = nowMs() - (t0 + ticks * trMs);
+      if (Math.abs(lastDriftMs) > maxAbsDriftMs) maxAbsDriftMs = Math.abs(lastDriftMs);
+      onTick(ticks, due);
+    }
+    schedule();
+  }
+
+  schedule();
+
+  return {
+    stop() { stopped = true; if (handle != null) clearTimeout(handle); handle = null; },
+    get ticks() { return ticks; },
+    get stopped() { return stopped; },
+    get elapsedMs() { return nowMs() - t0; },
+    /** How late the last pulse was against the ideal schedule. */
+    get driftMs() { return lastDriftMs; },
+    /** Worst deviation seen. This is the number that says "exactly the TR". */
+    get maxAbsDriftMs() { return maxAbsDriftMs; },
+  };
 }
 
 /**
@@ -137,9 +274,8 @@ function create(opts) {
   if (given.faux_fives !== undefined) cfg.fauxFives = !!given.faux_fives;
   if (given.mode !== undefined) cfg.fauxFives = (given.mode === 'faux');
 
-  if (!(cfg.trMs > 0)) {
-    throw new Error('scanner-clock: trMs must be a positive number');
-  }
+  cfg.trMs = resolveTrMs(given);
+  cfg.trSec = cfg.trMs / 1000;
   if (!(Number.isInteger(cfg.pulsesPerVolume) && cfg.pulsesPerVolume >= 1)) {
     throw new Error('scanner-clock: pulsesPerVolume must be an integer >= 1');
   }
@@ -484,21 +620,6 @@ function create(opts) {
   }
 
   // ---- faux generator -----------------------------------------------------
-  function makeKeyEvent() {
-    const init = {
-      key: primaryKey,
-      code: primaryKey.length === 1 && primaryKey >= '0' && primaryKey <= '9'
-        ? 'Digit' + primaryKey
-        : 'Key' + primaryKey.toUpperCase(),
-      bubbles: true,
-    };
-    if (typeof globalThis !== 'undefined' && typeof globalThis.KeyboardEvent === 'function') {
-      return new globalThis.KeyboardEvent('keydown', init);
-    }
-    // Non-DOM host (tests, Node): a plain object carries everything we read.
-    return Object.assign({ type: 'keydown', isTrusted: false, target: null }, init);
-  }
-
   /** Start the faux generator. No-op unless fauxFives is on. Returns started. */
   function start() {
     if (destroyed) return false;
@@ -507,26 +628,30 @@ function create(opts) {
       return false;
     }
     if (timer != null) return true;
-    timer = setInterval(() => {
+    timer = makeTicker(cfg.trMs, (n, burst) => {
+      if (burst > 1 && n === burst) {
+        emit('faux_catch_up', { pulses: burst, trMs: cfg.trMs });
+      }
       if (target && typeof target.dispatchEvent === 'function') {
-        target.dispatchEvent(makeKeyEvent());
+        target.dispatchEvent(makeKeyEvent(primaryKey));
       } else {
         // No event target at all: drive the handler's tail directly.
         fauxPulses++;
         onPulse('faux');
       }
-    }, cfg.trMs);
-    if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref();
-    emit('faux_scanner_started', { trMs: cfg.trMs, key: primaryKey });
+    });
+    emit('faux_scanner_started', { trMs: cfg.trMs, trSec: cfg.trMs / 1000, key: primaryKey });
     return true;
   }
 
   /** Stop the faux generator. Real pulses are still counted. */
   function stop() {
     if (timer != null) {
-      clearInterval(timer);
+      timer.stop();
+      emit('faux_scanner_stopped', {
+        volume: count, pulses: timer.ticks, maxAbsDriftMs: timer.maxAbsDriftMs,
+      });
       timer = null;
-      emit('faux_scanner_stopped', { volume: count });
     }
   }
 
@@ -578,6 +703,8 @@ function create(opts) {
       hiddenMs: hiddenMs + (hiddenSince != null ? Date.now() - hiddenSince : 0),
       pendingWaits: waiters.length,
       running: timer != null,
+      // Worst deviation of the faux pulse train from the ideal schedule.
+      fauxDriftMs: timer ? timer.maxAbsDriftMs : 0,
       destroyed,
     };
   }
@@ -611,10 +738,86 @@ function create(opts) {
   return clock;
 }
 
-const api = { create, createScannerClock: create, VERSION, DEFAULTS };
+/**
+ * Press "5" at exactly the TR, and nothing else.
+ *
+ *   const scanner = simulate(2);     // a "5" keydown every 2s, forever
+ *   scanner.stop();
+ *
+ * This is a stand-in for the scanner, not a clock: it drives ANY task that
+ * listens for the trigger key, whether or not that task uses this module. Use
+ * it to pilot a task on the desk, or to check that a task reacts to triggers at
+ * all before you are standing in the console room.
+ *
+ * The TR is in SECONDS, and must be a whole or half second (see trStepMs).
+ *
+ * @param {number|object} trSec  TR in seconds, or an options object.
+ * @param {object} [opts]  key, trStepMs, target, onPulse, autoStart.
+ */
+function simulate(trSec, opts) {
+  const given = Object.assign(
+    {},
+    typeof trSec === 'object' && trSec !== null ? trSec : { trSec },
+    opts || {}
+  );
+
+  const known = new Set(['trSec', 'trMs', 'trStepMs', 'key', 'target', 'onPulse', 'autoStart']);
+  const unknown = Object.keys(given).filter(k => !known.has(k) && given[k] !== undefined);
+  if (unknown.length) {
+    throw new Error('scanner-clock: simulate() does not take ' +
+      unknown.map(k => '"' + k + '"').join(', ') +
+      '. It takes: ' + [...known].join(', ') + '.');
+  }
+  if (given.trSec === undefined && given.trMs === undefined) {
+    throw new Error('scanner-clock: simulate(trSec) needs the TR, in seconds — ' +
+      'e.g. simulate(2) for a 2s TR.');
+  }
+
+  const trMs = resolveTrMs(given);
+  const key = String(Array.isArray(given.key) ? given.key[0] : (given.key || DEFAULTS.key));
+  const target = given.target !== undefined && given.target !== null
+    ? given.target
+    : (typeof globalThis !== 'undefined' ? globalThis.window : null);
+
+  let ticker = null;
+
+  function start() {
+    if (ticker && !ticker.stopped) return controller;
+    ticker = makeTicker(trMs, (n, burst) => {
+      if (target && typeof target.dispatchEvent === 'function') {
+        target.dispatchEvent(makeKeyEvent(key));
+      }
+      if (typeof given.onPulse === 'function') {
+        given.onPulse({ pulse: n, burst, trMs, driftMs: ticker.driftMs });
+      }
+    });
+    return controller;
+  }
+
+  const controller = {
+    start,
+    stop() { if (ticker) ticker.stop(); return controller; },
+    get running() { return !!ticker && !ticker.stopped; },
+    get count() { return ticker ? ticker.ticks : 0; },
+    get elapsedMs() { return ticker ? ticker.elapsedMs : 0; },
+    /** How late the last pulse was against the ideal schedule. */
+    get driftMs() { return ticker ? ticker.driftMs : 0; },
+    /** Worst deviation seen — the number behind "exactly the TR". */
+    get maxAbsDriftMs() { return ticker ? ticker.maxAbsDriftMs : 0; },
+    get trMs() { return trMs; },
+    get trSec() { return trMs / 1000; },
+    get key() { return key; },
+  };
+
+  if (given.autoStart !== false) start();
+  return controller;
+}
+
+const api = { create, createScannerClock: create, simulate, VERSION, DEFAULTS };
 module.exports = api;
 module.exports.create = create;
 module.exports.createScannerClock = create;
+module.exports.simulate = simulate;
 module.exports.VERSION = VERSION;
 module.exports.DEFAULTS = DEFAULTS;
 module.exports.default = api;

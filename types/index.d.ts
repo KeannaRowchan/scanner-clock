@@ -5,6 +5,10 @@ export type Rounding = 'round' | 'floor' | 'ceil';
 export interface ScannerClockOptions {
   /** Milliseconds per volume. The only place the TR lives. Default 1000. */
   trMs?: number;
+  /** The TR in seconds instead — give this or `trMs`, not both. */
+  trSec?: number;
+  /** TR granularity. Default 500: whole or half seconds only. 0 allows any TR. */
+  trStepMs?: number;
   /** Key, or keys, the scanner sends. Default '5'. */
   key?: string | string[];
   /** Pulses the sequence sends per volume — raise it for per-slice or per-echo triggers. Default 1. */
@@ -49,6 +53,7 @@ export type ScannerClockEvent =
   | 'pulse_timeout'
   | 'visibility_change'
   | 'double_clock_warning'
+  | 'faux_catch_up'
   | 'faux_scanner_started'
   | 'faux_scanner_stopped'
   | 'faux_disabled'
@@ -73,6 +78,8 @@ export interface ScannerClockSnapshot {
   guardMs: number;
   pulsesPerVolume: number;
   dummyVolumes: number;
+  /** Worst deviation of the faux pulse train from the ideal schedule, in ms. */
+  fauxDriftMs: number;
   rounding: Rounding;
   key: string[];
   fauxFives: boolean;
@@ -140,7 +147,52 @@ export interface ScannerClock {
   awaitRunStart(meta?: { dummyVolumes?: number } & Record<string, unknown>): Promise<number>;
 }
 
+/** A running stand-in for the scanner: presses the trigger key at exactly the TR. */
+export interface ScannerSimulator {
+  /** Start pulsing (already started unless you passed `autoStart: false`). */
+  start(): ScannerSimulator;
+  stop(): ScannerSimulator;
+  readonly running: boolean;
+  /** Pulses emitted so far. */
+  readonly count: number;
+  readonly elapsedMs: number;
+  /** How late the last pulse was against the ideal schedule, in ms. */
+  readonly driftMs: number;
+  /** Worst deviation seen — the number behind "exactly the TR". */
+  readonly maxAbsDriftMs: number;
+  readonly trMs: number;
+  readonly trSec: number;
+  readonly key: string;
+}
+
+export interface SimulateOptions {
+  /** TR in seconds. Must be a whole or half second unless `trStepMs` says otherwise. */
+  trSec?: number;
+  /** TR in milliseconds instead. */
+  trMs?: number;
+  /** TR granularity. Default 500. */
+  trStepMs?: number;
+  /** Key to press. Default '5'. */
+  key?: string | string[];
+  /** EventTarget to dispatch on. Default globalThis.window. */
+  target?: EventTarget | null;
+  /** Called on every pulse. */
+  onPulse?: (info: { pulse: number; burst: number; trMs: number; driftMs: number }) => void;
+  /** Pass false to create it stopped. Default true. */
+  autoStart?: boolean;
+}
+
 export declare function create(opts?: ScannerClockOptions): ScannerClock;
+
+/**
+ * Press the trigger key at exactly the TR, and nothing else — a stand-in for
+ * the scanner in front of any task, including one that does not use this module.
+ *
+ *   const scanner = simulate(2);   // a "5" keydown every 2s
+ *   scanner.stop();
+ */
+export declare function simulate(trSec: number, opts?: SimulateOptions): ScannerSimulator;
+export declare function simulate(opts: SimulateOptions): ScannerSimulator;
 export declare const createScannerClock: typeof create;
 export declare const VERSION: string;
 export declare const DEFAULTS: ScannerClockOptions;
@@ -148,6 +200,7 @@ export declare const DEFAULTS: ScannerClockOptions;
 declare const _default: {
   create: typeof create;
   createScannerClock: typeof create;
+  simulate: typeof simulate;
   VERSION: string;
   DEFAULTS: typeof DEFAULTS;
 };

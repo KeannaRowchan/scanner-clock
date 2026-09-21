@@ -24,8 +24,8 @@ const exportLines = source
   .filter(({ line }) => /^\s*(export|import)\b/.test(line));
 
 const allowed = [
-  'export { create, create as createScannerClock, VERSION, DEFAULTS };',
-  'export default { create, createScannerClock: create, VERSION, DEFAULTS };',
+  'export { create, create as createScannerClock, simulate, VERSION, DEFAULTS };',
+  'export default { create, createScannerClock: create, simulate, VERSION, DEFAULTS };',
 ];
 for (const { line, n } of exportLines) {
   if (!allowed.includes(line.trim())) {
@@ -63,10 +63,11 @@ writeFileSync(join(OUT, 'scanner-clock.cjs'), `${banner}
 'use strict';
 ${body}
 
-const api = { create, createScannerClock: create, VERSION, DEFAULTS };
+const api = { create, createScannerClock: create, simulate, VERSION, DEFAULTS };
 module.exports = api;
 module.exports.create = create;
 module.exports.createScannerClock = create;
+module.exports.simulate = simulate;
 module.exports.VERSION = VERSION;
 module.exports.DEFAULTS = DEFAULTS;
 module.exports.default = api;
@@ -81,7 +82,10 @@ writeFileSync(join(OUT, 'scanner-clock.umd.js'), `${banner}
   'use strict';
 ${body}
 
-  return { create: create, createScannerClock: create, VERSION: VERSION, DEFAULTS: DEFAULTS };
+  return {
+    create: create, createScannerClock: create, simulate: simulate,
+    VERSION: VERSION, DEFAULTS: DEFAULTS,
+  };
 });
 `);
 

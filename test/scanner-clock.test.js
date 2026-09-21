@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { create, VERSION } from '../src/scanner-clock.js';
+import { create, simulate, VERSION } from '../src/scanner-clock.js';
 import { makeEnv, realKey, fauxKey, textField, tick } from './helpers/dom.js';
 
 // Tests use a short TR so the suite runs in well under a second. The logic
@@ -8,9 +8,13 @@ import { makeEnv, realKey, fauxKey, textField, tick } from './helpers/dom.js';
 const TR = 20;
 const GUARD = 8;
 
+// trStepMs: 1 relaxes the whole/half-second TR rule so the suite can use a
+// 20ms TR and stay fast. The rule itself is tested in 'TR granularity'.
 const mk = (opts = {}) => {
   const env = makeEnv();
-  const clock = create({ trMs: TR, guardMs: GUARD, target: env.win, doc: env.doc, ...opts });
+  const clock = create({
+    trMs: TR, guardMs: GUARD, trStepMs: 1, target: env.win, doc: env.doc, ...opts,
+  });
   return { ...env, clock };
 };
 
@@ -24,7 +28,7 @@ test('config validation', async t => {
     // A fixed 500ms default would make every TR at or below 500ms unusable.
     const cases = [[3000, 500], [1000, 500], [800, 400], [400, 200], [100, 50]];
     for (const [trMs, expected] of cases) {
-      const c = create({ trMs, target: null, doc: null });
+      const c = create({ trMs, trStepMs: 1, target: null, doc: null });
       assert.equal(c.guardMs, expected, `TR ${trMs}`);
       assert.ok(c.guardMs < c.trMs);
       c.destroy();
@@ -43,7 +47,7 @@ test('config validation', async t => {
     assert.throws(() => create({ trMS: 2000, target: null, doc: null }),
       /unknown option "trMS" \(did you mean "trMs"\?\)/);
     assert.throws(() => create({ tr: 2, target: null, doc: null }),
-      /did you mean "trMs"/);
+      /did you mean "trSec"/);
     assert.throws(() => create({ triggerKey: '5', target: null, doc: null }),
       /did you mean "key"/);
     assert.throws(() => create({ nonsense: 1, target: null, doc: null }),
@@ -74,8 +78,8 @@ test('config validation', async t => {
   });
 
   await t.test('legacy spellings still work', () => {
-    const a = create({ trMs: TR, guardMs: GUARD, faux_fives: true, target: null, doc: null });
-    const b = create({ trMs: TR, guardMs: GUARD, mode: 'faux', target: null, doc: null });
+    const a = create({ trMs: TR, guardMs: GUARD, trStepMs: 1, faux_fives: true, target: null, doc: null });
+    const b = create({ trMs: TR, guardMs: GUARD, trStepMs: 1, mode: 'faux', target: null, doc: null });
     assert.equal(a.fauxFives, true);
     assert.equal(b.fauxFives, true);
     a.destroy(); b.destroy();
@@ -350,7 +354,7 @@ test('faux generator', async t => {
   await t.test('autoStart starts it during create()', async () => {
     const env = makeEnv();
     const clock = create({
-      trMs: TR, guardMs: GUARD, fauxFives: true, autoStart: true,
+      trMs: TR, guardMs: GUARD, trStepMs: 1, fauxFives: true, autoStart: true,
       target: env.win, doc: env.doc,
     });
     assert.equal(clock.running, true);
@@ -505,7 +509,7 @@ test('non-1s TRs', async t => {
   await t.test('holds scale with whatever TR was given', async () => {
     for (const trMs of [17, 43, 130]) {
       const env = makeEnv();
-      const clock = create({ trMs, target: env.win, doc: env.doc });
+      const clock = create({ trMs, trStepMs: 1, target: env.win, doc: env.doc });
       const p = clock.hold(trMs * 3);
       env.pulses(3);
       await p;
@@ -524,9 +528,9 @@ test('non-1s TRs', async t => {
   });
 
   await t.test('msToVolumes follows the TR and the rounding policy', () => {
-    const round = create({ trMs: 1300, target: null, doc: null });
-    const floor = create({ trMs: 1300, rounding: 'floor', target: null, doc: null });
-    const ceil = create({ trMs: 1300, rounding: 'ceil', target: null, doc: null });
+    const round = create({ trMs: 1300, trStepMs: 1, target: null, doc: null });
+    const floor = create({ trMs: 1300, trStepMs: 1, rounding: 'floor', target: null, doc: null });
+    const ceil = create({ trMs: 1300, trStepMs: 1, rounding: 'ceil', target: null, doc: null });
     assert.equal(round.msToVolumes(2000), 2);   // 1.54 -> 2
     assert.equal(floor.msToVolumes(2000), 1);
     assert.equal(ceil.msToVolumes(2000), 2);
@@ -711,9 +715,125 @@ test('onWarn sink', async t => {
   });
 });
 
+test('TR granularity', async t => {
+  await t.test('whole and half seconds are accepted', () => {
+    for (const trSec of [0.5, 1, 1.5, 2, 2.5, 3]) {
+      const c = create({ trSec, target: null, doc: null });
+      assert.equal(c.trMs, trSec * 1000);
+      c.destroy();
+    }
+  });
+
+  await t.test('anything between them is rejected, with the nearest alternatives', () => {
+    assert.throws(() => create({ trSec: 2.4, target: null, doc: null }),
+      /a TR of 2\.4s is not a multiple of 0\.5s\. Nearest allowed: 2s or 2\.5s/);
+    assert.throws(() => create({ trMs: 1300, target: null, doc: null }),
+      /not a multiple of 0\.5s\. Nearest allowed: 1s or 1\.5s/);
+    assert.throws(() => create({ trMs: 750, target: null, doc: null }),
+      /Nearest allowed: 0\.5s or 1s/);
+  });
+
+  await t.test('trStepMs relaxes it for sequences that need it', () => {
+    const c = create({ trSec: 2.4, trStepMs: 100, target: null, doc: null });
+    assert.equal(c.trMs, 2400);
+    c.destroy();
+    const any = create({ trMs: 1234, trStepMs: 0, target: null, doc: null });
+    assert.equal(any.trMs, 1234);
+    any.destroy();
+  });
+
+  await t.test('trSec and trMs are interchangeable but not simultaneous', () => {
+    const a = create({ trSec: 1.5, target: null, doc: null });
+    const b = create({ trMs: 1500, target: null, doc: null });
+    assert.equal(a.trMs, b.trMs);
+    assert.equal(a.snapshot().trMs, 1500);
+    a.destroy(); b.destroy();
+    assert.throws(() => create({ trSec: 1.5, trMs: 1500, target: null, doc: null }),
+      /give trMs or trSec, not both/);
+  });
+
+  await t.test('a TR typed in the wrong unit is caught', () => {
+    // Someone thinking in seconds writes trMs: 2. Without this it would be a
+    // 2ms clock, which fails in a way that looks like something else entirely.
+    assert.throws(() => create({ trMs: 2, target: null, doc: null }),
+      /trMs is in MILLISECONDS — 2ms is not a TR\. Did you mean trSec: 2\?/);
+    assert.throws(() => create({ trSec: 0, target: null, doc: null }),
+      /trSec must be a positive number/);
+    // ...and the same mistake in the other direction.
+    assert.throws(() => create({ trSec: 2000, target: null, doc: null }),
+      /trSec is in SECONDS — 2000s is not a TR\. Did you mean trMs: 2000\?/);
+  });
+});
+
+test('simulate(trSec)', async t => {
+  await t.test('presses the key at the TR', async () => {
+    const env = makeEnv();
+    const seen = [];
+    const clock = create({ trSec: 1, trStepMs: 1, target: env.win, doc: env.doc });
+    const sim = simulate(0.02, { trStepMs: 1, target: env.win, onPulse: p => seen.push(p) });
+    try {
+      await clock.awaitTriggers(4);
+      assert.ok(seen.length >= 4);
+      assert.equal(clock.fauxPulses, clock.count, 'the clock saw them as synthetic');
+      assert.equal(sim.trMs, 20);
+      assert.equal(sim.trSec, 0.02);
+    } finally {
+      sim.stop();
+      clock.destroy();
+    }
+  });
+
+  await t.test('starts on its own and stops when told', async () => {
+    const env = makeEnv();
+    let n = 0;
+    const sim = simulate({ trMs: 20, trStepMs: 1, target: env.win, onPulse: () => n++ });
+    assert.equal(sim.running, true, 'running without an explicit start()');
+    await tick(70);
+    sim.stop();
+    assert.equal(sim.running, false);
+    const atStop = n;
+    await tick(70);
+    assert.equal(n, atStop, 'no pulses after stop');
+  });
+
+  await t.test('holds an absolute schedule rather than drifting', async () => {
+    // setInterval measures each gap from the previous callback, so its error
+    // accumulates. This measures every pulse against t0.
+    const sim = simulate(0.02, { trStepMs: 1, target: null });
+    await tick(600);
+    sim.stop();
+    assert.ok(sim.count >= 25, `roughly 30 pulses in 600ms (got ${sim.count})`);
+    assert.ok(sim.maxAbsDriftMs < 25, `max drift ${sim.maxAbsDriftMs.toFixed(1)}ms`);
+  });
+
+  await t.test('emits the pulses a block made late, rather than losing them', async () => {
+    // A real scanner keeps pulsing through a busy task and the keydowns arrive
+    // late; a generator that skipped them would flatter a pilot run.
+    const sim = simulate(0.01, { trStepMs: 1, target: null });
+    const until = Date.now() + 120;
+    while (Date.now() < until) { /* block the thread */ }
+    await tick(40);
+    sim.stop();
+    assert.ok(sim.count >= 10, `caught up after the block (got ${sim.count})`);
+  });
+
+  await t.test('enforces the same TR granularity', () => {
+    assert.throws(() => simulate(2.4), /not a multiple of 0\.5s/);
+    assert.throws(() => simulate(2000), /trSec is in SECONDS — 2000s is not a TR\. Did you mean trMs: 2000\?/);
+    const sim = simulate(0.5, { target: null });
+    assert.equal(sim.trMs, 500);
+    sim.stop();
+  });
+
+  await t.test('says what it needs when called wrong', () => {
+    assert.throws(() => simulate(), /simulate\(trSec\) needs the TR, in seconds/);
+    assert.throws(() => simulate(1, { fauxFives: true }), /simulate\(\) does not take "fauxFives"/);
+  });
+});
+
 test('headless use (no DOM at all)', async t => {
   await t.test('creates and runs off manual pulses', async () => {
-    const clock = create({ trMs: TR, guardMs: GUARD, target: null, doc: null });
+    const clock = create({ trMs: TR, guardMs: GUARD, trStepMs: 1, target: null, doc: null });
     const p = clock.awaitTriggers(2);
     clock.pulse();
     clock.pulse();
@@ -723,7 +843,7 @@ test('headless use (no DOM at all)', async t => {
   });
 
   await t.test('the faux generator still ticks without an event target', async () => {
-    const clock = create({ trMs: TR, guardMs: GUARD, fauxFives: true, target: null, doc: null });
+    const clock = create({ trMs: TR, guardMs: GUARD, trStepMs: 1, fauxFives: true, target: null, doc: null });
     clock.start();
     await clock.awaitTriggers(2);
     assert.equal(clock.fauxPulses, 2);

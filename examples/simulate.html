@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scanner simulator</title>
+<style>
+  :root { --bg:#fff; --fg:#17181c; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --panel:#f7f8fa; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --fg:#e8eaed; --muted:#9aa1ad; --line:#272b33; --accent:#7aa2ff; --panel:#161920; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--fg);
+         font:15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 620px; margin: 0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:16px; margin-bottom:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  button { font:inherit; padding:7px 14px; border-radius:7px; border:1px solid var(--line);
+           background:var(--bg); color:var(--fg); cursor:pointer; }
+  button:hover { border-color: var(--accent); }
+  select { font: inherit; padding: 6px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; }
+  .stat b { display:block; font-size:24px; font-variant-numeric:tabular-nums; }
+  .stat span { color:var(--muted); font-size:12px; }
+  #beat { font-size:44px; text-align:center; padding:12px 0; opacity:.25; transition:opacity .08s; }
+  #beat.on { opacity:1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>scanner simulator</h1>
+  <p class="sub">
+    <code>simulate(tr)</code> on its own: it presses <kbd>5</kbd> at exactly the TR
+    and does nothing else. Any task listening for the trigger will advance.
+  </p>
+
+  <div id="beat">5</div>
+
+  <div class="panel">
+    <label>TR
+      <select id="tr">
+        <option value="0.5">0.5 s</option>
+        <option value="1">1 s</option>
+        <option value="1.5">1.5 s</option>
+        <option value="2" selected>2 s</option>
+        <option value="2.5">2.5 s</option>
+        <option value="3">3 s</option>
+      </select>
+    </label>
+    <button id="toggle">Start</button>
+  </div>
+
+  <div class="panel stats">
+    <div class="stat"><b id="s-count">0</b><span>pulses sent</span></div>
+    <div class="stat"><b id="s-elapsed">0.0</b><span>seconds elapsed</span></div>
+    <div class="stat"><b id="s-drift">0.0</b><span>worst drift (ms)</span></div>
+  </div>
+</main>
+
+<script src="../dist/scanner-clock.umd.js"></script>
+<script>
+(function () {
+  'use strict';
+  var sim = null;
+  var beat = document.getElementById('beat');
+  var toggle = document.getElementById('toggle');
+
+  function flash() {
+    beat.classList.add('on');
+    setTimeout(function () { beat.classList.remove('on'); }, 90);
+  }
+
+  function refresh() {
+    if (!sim) return;
+    document.getElementById('s-count').textContent = sim.count;
+    document.getElementById('s-elapsed').textContent = (sim.elapsedMs / 1000).toFixed(1);
+    document.getElementById('s-drift').textContent = sim.maxAbsDriftMs.toFixed(1);
+  }
+
+  toggle.addEventListener('click', function () {
+    if (sim && sim.running) {
+      sim.stop();
+      toggle.textContent = 'Start';
+      return;
+    }
+    // The TR comes straight off the menu, in seconds. Anything that is not a
+    // whole or half second would be refused here.
+    sim = ScannerClock.simulate(Number(document.getElementById('tr').value), {
+      onPulse: function () { flash(); refresh(); },
+    });
+    toggle.textContent = 'Stop';
+    refresh();
+  });
+
+  setInterval(refresh, 250);
+})();
+</script>
+</body>
+</html>

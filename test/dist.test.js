@@ -28,7 +28,7 @@ test('dist builds', async t => {
 
   await t.test('behave identically', async () => {
     for (const build of [esm, cjs, umd]) {
-      const clock = build.create({ trMs: 20, guardMs: 8, target: null, doc: null });
+      const clock = build.create({ trMs: 20, guardMs: 8, trStepMs: 1, target: null, doc: null });
       const p = clock.awaitTriggers(2);
       clock.pulse();
       clock.pulse();

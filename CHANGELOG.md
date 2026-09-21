@@ -9,6 +9,12 @@ First packaged release, extracted from a single-file `scanner-clock.js`.
 
 ### Added
 - ESM, CommonJS and UMD builds generated from one source file; TypeScript declarations.
+- `simulate(trSec)` — a one-line stand-in for the scanner that presses the
+  trigger key at exactly the TR, usable in front of any task, including tasks
+  that do not use this module.
+- `trSec` as an alternative to `trMs`, and `trStepMs` (default 500) constraining
+  the TR to whole or half seconds. Each unit is guarded against the other's
+  magnitude: `trMs: 2` and `trSec: 2000` are both rejected with the fix named.
 - `pulsesPerVolume` for sequences that trigger per slice or per echo, with
   `rawPulses` alongside the volume count.
 - `dummyVolumes`, waited out by `awaitRunStart()` (overridable per run).
@@ -26,6 +32,14 @@ First packaged release, extracted from a single-file `scanner-clock.js`.
 - `target` / `doc` options, so the clock can run against an iframe window or headless.
 - `hold_end` event reporting how many volumes each screen actually cost.
 - 57-test suite with a dependency-free DOM stand-in.
+
+### Changed
+- The faux generator keeps an **absolute** schedule instead of `setInterval`, so
+  its error cannot accumulate, and it emits pulses a blocked thread made late
+  rather than dropping them — matching what a real scanner does to a busy task.
+  Measured over 4s at a 100ms interval with a 30ms render per pulse:
+  `setInterval` delivered 39 of 40 pulses and ran 103ms late; the new ticker
+  delivered all 40 with a 1.2ms worst-case deviation.
 
 ### Fixed
 - `guardMs` now defaults to `min(500, trMs / 2)` instead of a flat `500`. The old

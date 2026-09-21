@@ -29,6 +29,55 @@ matrix no longer describes what the participant saw.
 `scanner-clock` advances the task on those pulses instead. Timing is re-anchored
 to the scanner on **every screen**, so error cannot accumulate.
 
+## Just want the 5s?
+
+`simulate()` is the whole scanner in one line. Give it the TR in seconds and it
+presses `5` at exactly that rate, for as long as you leave it running:
+
+```js
+import { simulate } from 'scanner-clock';
+
+const scanner = simulate(2);     // a "5" keydown every 2s
+scanner.stop();
+```
+
+It dispatches real `KeyboardEvent`s at the window, so it drives **any** task
+that listens for the trigger — including tasks that have never heard of this
+module. Put it in the console of a task you are piloting and watch it advance.
+
+`scanner.maxAbsDriftMs` is the number behind "exactly": the worst deviation
+between a pulse and where the schedule said it should be. It stays near 1 ms,
+because each pulse is timed against the run's start rather than against the
+previous pulse. `setInterval` cannot do that — measured over 4 s at a 100 ms
+interval with a 30 ms render on each pulse, `setInterval` delivered 39 of 40
+pulses and ran 103 ms late; this delivered all 40 with a 1.2 ms worst case.
+
+## The TR is whole or half seconds
+
+The TR is the one number that makes every other number in the task wrong if it
+is entered wrong, so it is checked rather than taken on faith:
+
+```js
+create({ trSec: 2 });      // fine
+create({ trSec: 1.5 });    // fine
+create({ trMs: 2500 });    // fine — same thing in ms
+create({ trSec: 2.4 });    // throws: not a multiple of 0.5s.
+                           //         Nearest allowed: 2s or 2.5s
+create({ trMs: 2 });       // throws: trMs is in MILLISECONDS.
+                           //         Did you mean trSec: 2?
+create({ trSec: 2000 });   // throws: trSec is in SECONDS.
+                           //         Did you mean trMs: 2000?
+```
+
+Each unit is guarded against the other's magnitude, because a TR entered in the
+wrong unit still produces a perfectly functional clock running at a wildly wrong
+rate. **If your sequence genuinely runs at something else** — a 2.4 s or 0.8 s
+multiband TR is common — set the granularity:
+
+```js
+create({ trSec: 2.4, trStepMs: 100 });   // or trStepMs: 0 for anything
+```
+
 ## Not a 1 s TR?
 
 `trMs` is the only place the TR lives, and everything else is derived from it or
@@ -36,7 +85,7 @@ configurable alongside it:
 
 ```js
 create({
-  trMs: 2400,             // whatever your sequence runs at
+  trSec: 2.5,             // whatever your sequence runs at
   pulsesPerVolume: 1,     // raise it if the scanner pulses per slice, not per volume
   dummyVolumes: 4,        // steady-state volumes to wait out before the run
   key: ['5', 't'],        // some consoles send something other than "5"
@@ -121,10 +170,13 @@ logs a `double_clock_warning` and prints a console error once.
    check it before trusting a run's timing. Running fullscreen makes it unlikely.
 
 2. **Blocking work.** A long synchronous task (e.g. building a trial plan)
-   blocks the thread. Missed `setInterval` callbacks are **coalesced**, so the
-   faux generator loses pulses across a block; a real scanner's keydown events
-   are **queued** and delivered afterwards, so it does not. Do blocking setup
-   before the first run, and measure drift *within* runs, not across the session.
+   blocks the thread, and no timer fires while it does. The generator keeps an
+   **absolute** schedule and emits every pulse the wall clock says is due once
+   the thread frees up — which is what a real scanner does to a busy task: it
+   keeps pulsing, and the queued keydowns arrive late and in a burst (logged as
+   `faux_catch_up`). So a block stretches a screen in the pilot exactly as it
+   would in the scanner, rather than quietly costing a pulse. Still do blocking
+   setup before the first run.
 
 ## API
 
@@ -137,6 +189,8 @@ Anything not listed here is an error, not an ignored key.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `trMs` | `1000` | Milliseconds per volume. |
+| `trSec` | — | The TR in seconds instead. Give this or `trMs`, not both. |
+| `trStepMs` | `500` | TR granularity: whole or half seconds. `0` allows any TR. |
 | `key` | `'5'` | Key, or array of keys, the scanner sends. |
 | `pulsesPerVolume` | `1` | Raise it when the sequence pulses per slice or per echo. |
 | `dummyVolumes` | `0` | Steady-state volumes `awaitRunStart()` waits out. |
@@ -200,8 +254,8 @@ instead of hanging, which is what you want on an escape-key abort.
 ### Events
 
 `pulse`, `run_start`, `hold_end`, `duration_rounded`, `pulse_timeout`,
-`visibility_change`, `double_clock_warning`, `faux_scanner_started`,
-`faux_scanner_stopped`, `faux_disabled`, `destroyed`.
+`visibility_change`, `double_clock_warning`, `faux_catch_up`,
+`faux_scanner_started`, `faux_scanner_stopped`, `faux_disabled`, `destroyed`.
 
 Two of them are warnings you want to see in the scanner room rather than in a
 log file afterwards, so they also go to `onWarn` (`console.error` by default):
@@ -268,7 +322,7 @@ replace the frame-count end condition with an `await clock.hold(...)`.
 ## Development
 
 ```bash
-npm test          # 84 tests, no dependencies, ~2 s
+npm test          # 97 tests, no dependencies, ~4 s
 npm run build     # regenerate dist/ from src/scanner-clock.js
 npm run check     # build + test, as CI runs it
 ```
