@@ -8,10 +8,12 @@
 import { create } from 'scanner-clock';
 
 const clock = create({
-  trMs: 1000,
+  trMs: 2400,          // whatever the sequence runs at; nothing else assumes 1s
   key: '5',
-  guardMs: 500,
-  fauxFives: false,   // <- true only for behavioural piloting
+  dummyVolumes: 4,     // steady-state volumes discarded before the run
+  strictDurations: true, // refuse a schedule that isn't whole volumes
+  pulseTimeoutMs: 15000, // shout if no trigger arrives while we are waiting
+  fauxFives: false,    // <- true only for behavioural piloting
   onLog: (event, data) => jsPsych.data.write({ clock_event: event, ...data }),
 });
 
@@ -23,7 +25,9 @@ function lockedTrial({ stimulus, choices, volumes, label }) {
     choices,
     trial_duration: null,        // the clock ends this trial, not jsPsych
     on_load() {
-      clock.hold(volumes * clock.trMs, { label }).then(() => jsPsych.finishTrial());
+      // holdVolumes, not hold(ms): the design is specified in volumes, so there
+      // is nothing to round.
+      clock.holdVolumes(volumes, { label }).then(() => jsPsych.finishTrial());
     },
     data: { label },
     on_start: () => ({ onset_volume: clock.count }),
@@ -41,8 +45,8 @@ const timeline = [
     choices: 'NO_KEYS',
     trial_duration: null,
     on_load() {
-      clock.awaitRunStart({ run: 'main' })
-        .then(() => clock.hold(5000, { label: 'burn-in' }))   // 5 volumes
+      clock.awaitRunStart({ run: 'main' })          // waits 1 pulse + 4 dummies
+        .then(() => clock.holdVolumes(5, { label: 'burn-in' }))
         .then(() => jsPsych.finishTrial());
     },
   },

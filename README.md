@@ -29,6 +29,34 @@ matrix no longer describes what the participant saw.
 `scanner-clock` advances the task on those pulses instead. Timing is re-anchored
 to the scanner on **every screen**, so error cannot accumulate.
 
+## Not a 1 s TR?
+
+`trMs` is the only place the TR lives, and everything else is derived from it or
+configurable alongside it:
+
+```js
+create({
+  trMs: 2400,             // whatever your sequence runs at
+  pulsesPerVolume: 1,     // raise it if the scanner pulses per slice, not per volume
+  dummyVolumes: 4,        // steady-state volumes to wait out before the run
+  key: ['5', 't'],        // some consoles send something other than "5"
+  strictDurations: true,  // refuse durations that aren't whole volumes
+});
+```
+
+- **`guardMs` scales with the TR** unless you set it (`min(500, trMs / 2)`). A
+  fixed 500 ms default would make the constructor throw for any TR at or below
+  500 ms — a short-TR multiband sequence could not even be configured.
+- **`hold(ms)` converts through one rounding policy**, and tells you when the
+  conversion wasn't exact. At TR = 1 s, `hold(1500)` logs a `duration_rounded`
+  event saying it ran 2 volumes, 500 ms longer than you asked. With
+  `strictDurations: true` it throws instead. Use **`holdVolumes(n)`** when your
+  design is written in volumes and you want no rounding at all.
+- **Unknown options are rejected.** `create({ trMS: 2400 })` throws
+  `unknown option "trMS" (did you mean "trMs"?)` rather than silently leaving
+  the task at the 1000 ms default while the scanner runs at 2.4 s. Same
+  reasoning as the `fauxFives` default below: the loud failure is the safe one.
+
 ## Install
 
 ```bash
@@ -102,16 +130,36 @@ logs a `double_clock_warning` and prints a console error once.
 
 ### `create(options)`
 
+Anything not listed here is an error, not an ignored key.
+
+**The scanner**
+
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `trMs` | `1000` | Scanner TR in ms. |
+| `trMs` | `1000` | Milliseconds per volume. |
 | `key` | `'5'` | Key, or array of keys, the scanner sends. |
-| `guardMs` | `500` | Sleep stops this early, then syncs to the pulse. Must be `< trMs`. |
+| `pulsesPerVolume` | `1` | Raise it when the sequence pulses per slice or per echo. |
+| `dummyVolumes` | `0` | Steady-state volumes `awaitRunStart()` waits out. |
+
+**Timing policy**
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `guardMs` | `min(500, trMs/2)` | Sleep stops this early, then syncs to the pulse. Must be `< trMs`. |
+| `rounding` | `'round'` | How ms convert to whole volumes: `'round'`, `'floor'`, `'ceil'`. |
+| `strictDurations` | `false` | Throw instead of rounding a non-multiple of `trMs`. |
+| `pulseTimeoutMs` | `0` | Warn when a wait sees no pulse for this long. `0` disables it. |
+
+**Piloting and plumbing**
+
+| Option | Default | Meaning |
+| --- | --- | --- |
 | `fauxFives` | `false` | Generate pulses locally. See above. |
-| `onLog` | `null` | `(event, data) => void` sink for every clock event. |
-| `ignoreTextEntry` | `true` | A `5` typed into an input/textarea is an answer, not a volume. |
-| `logPulses` | `false` | Also emit a `pulse` event per volume (verbose). |
 | `autoStart` | `false` | Call `start()` during `create()`. |
+| `onLog` | `null` | `(event, data) => void` sink for every clock event. |
+| `onWarn` | `console.error` | `(message, event, data) => void` for operator-facing warnings. |
+| `ignoreTextEntry` | `true` | A `5` typed into an input/textarea is an answer, not a volume. |
+| `logPulses` | `false` | Also emit a `pulse` event per pulse (verbose). |
 | `target` | `window` | `EventTarget` to listen on. Pass an iframe's window, or `null` for headless. |
 | `doc` | `document` | Document used for visibility logging. |
 
@@ -119,11 +167,12 @@ logs a `double_clock_warning` and prints a console error once.
 
 | Method | Returns |
 | --- | --- |
-| `hold(ms, opts?)` | Hold for `ms`, ending on a pulse. Resolves with the volume. |
+| `hold(ms, opts?)` | Hold for `ms`, rounded to whole volumes, ending on a pulse. Resolves with the volume. |
+| `holdVolumes(n, opts?)` | Hold for exactly `n` volumes — never rounded, and the natural call when your design is written in volumes. |
 | `holdUntil(deadlineMs, opts?)` | Same, against an absolute wall-clock deadline — for windows whose start is fixed while their contents are self-paced. |
 | `awaitTriggers(n, signal?)` | Resolve after `n` further pulses. **Pure counting** — immune to timer throttling, unlike `hold()`. |
 | `awaitCount(target, signal?)` | Resolve once the running count reaches an absolute target. |
-| `awaitRunStart(meta?)` | Wait for the next pulse and log `run_start`, so a run begins on a known volume. In the scanner this also means the task simply waits if the scan has not begun. |
+| `awaitRunStart(meta?)` | Wait out one pulse plus `dummyVolumes`, then log `run_start`, so a run begins on a known volume. In the scanner this also means the task simply waits if the scan has not begun. Pass `{ dummyVolumes: n }` to override per run. |
 
 `opts` is `{ onWaitStart, signal, label }` (a bare function is still accepted as
 `onWaitStart`). `onWaitStart` fires just before the trailing pulse-wait — use it
@@ -138,7 +187,8 @@ instead of hanging, which is what you want on an escape-key abort.
 | Member | Meaning |
 | --- | --- |
 | `count` / `volume` | Volumes counted so far. **Log this at every screen onset.** |
-| `realPulses` / `fauxPulses` / `manualPulses` | Pulse provenance. In the scanner, `realPulses` should equal `count` and `fauxPulses` should be `0`. |
+| `realPulses` / `fauxPulses` / `manualPulses` | Pulse provenance. In the scanner, `realPulses` should equal `rawPulses` and `fauxPulses` should be `0`. |
+| `rawPulses` | Pulses before the `pulsesPerVolume` divisor. Equals `count` when it is `1`. |
 | `hiddenMs` | Total time the document has spent hidden. Nonzero means suspect timing. |
 | `msToVolumes(ms)` / `volumesToMs(n)` | Rounding helpers. |
 | `start()` / `stop()` | Start/stop the faux generator. No-op unless `fauxFives`. |
@@ -149,8 +199,21 @@ instead of hanging, which is what you want on an escape-key abort.
 
 ### Events
 
-`pulse`, `run_start`, `hold_end`, `visibility_change`, `double_clock_warning`,
-`faux_scanner_started`, `faux_scanner_stopped`, `faux_disabled`, `destroyed`.
+`pulse`, `run_start`, `hold_end`, `duration_rounded`, `pulse_timeout`,
+`visibility_change`, `double_clock_warning`, `faux_scanner_started`,
+`faux_scanner_stopped`, `faux_disabled`, `destroyed`.
+
+Two of them are warnings you want to see in the scanner room rather than in a
+log file afterwards, so they also go to `onWarn` (`console.error` by default):
+`double_clock_warning` and `pulse_timeout`. The latter is the only way to tell a
+run that is correctly waiting for the scanner from one that is stalled because
+no trigger is arriving:
+
+```js
+create({ trMs: 2400, pulseTimeoutMs: 10000 });
+// -> 'no "5" pulse for 10000ms while the task is waiting at volume 0.
+//     Is the trigger connected, and has the scan started?'
+```
 
 ## Logging for QC
 
@@ -172,11 +235,12 @@ end of a run, write `clock.snapshot()` into the data file:
 jsPsych.data.addProperties({ scanner_clock: clock.snapshot() });
 ```
 
-Three fields are worth checking on every dataset:
+Four fields are worth checking on every dataset:
 
 - `fauxPulses` — must be `0` for scanner runs.
 - `doubleClockDetected` — must be `false`.
 - `hiddenMs` — must be `0`, or the run left the foreground.
+- `trMs` / `pulsesPerVolume` — must match the sequence that was actually run.
 
 ## jsPsych
 
@@ -204,7 +268,7 @@ replace the frame-count end condition with an `await clock.hold(...)`.
 ## Development
 
 ```bash
-npm test          # 57 tests, no dependencies, ~1 s
+npm test          # 84 tests, no dependencies, ~2 s
 npm run build     # regenerate dist/ from src/scanner-clock.js
 npm run check     # build + test, as CI runs it
 ```

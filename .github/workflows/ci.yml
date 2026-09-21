@@ -34,6 +34,16 @@ jobs:
       # committed files no longer match the source.
       - run: git diff --exit-code -- dist/
 
+  types:
+    runs-on: ubuntu-latest
+    name: declarations type-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npx -y -p typescript@5 tsc --noEmit --strict --lib es2022,dom types/index.d.ts
+
   pack:
     runs-on: ubuntu-latest
     name: package contents

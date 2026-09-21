@@ -12,6 +12,13 @@
  *   so timing is re-anchored to the scanner on every screen and error cannot
  *   accumulate.
  *
+ * NOTHING HERE ASSUMES A 1s TR
+ *   trMs is the only place the TR lives; guardMs scales with it unless you set
+ *   it, durations convert through one rounding policy, and a sequence that
+ *   pulses per slice rather than per volume is pulsesPerVolume. Every default
+ *   is in DEFAULTS, and an option this module does not recognise is an ERROR
+ *   rather than a silent fallback to 1s — see the note on that check.
+ *
  * THE CORE PATTERN — hold()
  *   To hold a screen for N ms and end it on a pulse, hold() sleeps to
  *   N - guardMs and then waits for the volume count to reach its target. The
@@ -47,17 +54,45 @@
 const VERSION = '0.1.0';
 
 const DEFAULTS = {
-  trMs: 1000,           // scanner TR, in ms
-  key: '5',             // key (or array of keys) the scanner sends
-  guardMs: 500,         // sleep stops this early, then syncs to the pulse
-  fauxFives: false,     // true = generate pulses locally; false = real only
-  onLog: null,          // (event, data) => void
-  ignoreTextEntry: true,// a "5" typed into a field is an answer, not a volume
-  logPulses: false,     // emit a 'pulse' event for every volume (verbose)
-  autoStart: false,     // call start() during create()
-  target: null,         // EventTarget to listen on (default: window)
-  doc: null,            // Document for visibility logging (default: document)
+  // --- the scanner ---------------------------------------------------------
+  trMs: 1000,             // ms per volume. NOTHING else assumes 1s.
+  key: '5',               // key, or array of keys, the scanner sends
+  pulsesPerVolume: 1,     // raise it if your sequence pulses per slice or echo
+  dummyVolumes: 0,        // volumes awaitRunStart() waits out before the run
+
+  // --- timing policy -------------------------------------------------------
+  guardMs: null,          // null => min(500, trMs / 2). Must end up < trMs.
+  rounding: 'round',      // ms -> volumes: 'round' | 'floor' | 'ceil'
+  strictDurations: false, // throw instead of rounding a non-multiple of trMs
+  pulseTimeoutMs: 0,      // 0 = off; else warn when a wait sees no pulse this long
+
+  // --- piloting ------------------------------------------------------------
+  fauxFives: false,       // true = generate pulses locally; false = real only
+  autoStart: false,       // call start() during create()
+
+  // --- plumbing ------------------------------------------------------------
+  onLog: null,            // (event, data) => void
+  onWarn: null,           // (message, event, data) => void; default console.error
+  ignoreTextEntry: true,  // a "5" typed into a field is an answer, not a volume
+  logPulses: false,       // emit a 'pulse' event for every pulse (verbose)
+  target: null,           // EventTarget to listen on (default: window)
+  doc: null,              // Document for visibility logging (default: document)
 };
+
+const ROUNDERS = { round: Math.round, floor: Math.floor, ceil: Math.ceil };
+
+// Aliases people reach for. They are REJECTED, not silently accepted: a typo in
+// trMs would otherwise leave the task running at the 1000ms default while the
+// scanner ran at a different TR, and nothing would look wrong.
+const OPTION_HINTS = {
+  tr: 'trMs', trms: 'trMs', trsec: 'trMs', trseconds: 'trMs', repetitiontime: 'trMs',
+  guard: 'guardMs', guardms: 'guardMs',
+  triggerkey: 'key', scannerkey: 'key', keys: 'key',
+  faux: 'fauxFives', dummy: 'dummyVolumes', dummies: 'dummyVolumes',
+  slicespervolume: 'pulsesPerVolume', pulsespervol: 'pulsesPerVolume',
+};
+
+const LEGACY_OPTIONS = ['faux_fives', 'mode'];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -79,20 +114,52 @@ function destroyedError() {
  * @returns {object} clock
  */
 function create(opts) {
-  const cfg = Object.assign({}, DEFAULTS, opts || {});
+  const given = opts || {};
+
+  // Reject unknown options rather than ignoring them. Same reasoning as the
+  // fauxFives default: the failure that is loud is the safe one.
+  const known = new Set(Object.keys(DEFAULTS).concat(LEGACY_OPTIONS));
+  const unknown = Object.keys(given).filter(k => !known.has(k));
+  if (unknown.length) {
+    const described = unknown.map(k => {
+      const lower = k.toLowerCase();
+      const near = OPTION_HINTS[lower] ||
+        Object.keys(DEFAULTS).find(n => n.toLowerCase() === lower);
+      return near ? `"${k}" (did you mean "${near}"?)` : `"${k}"`;
+    });
+    throw new Error('scanner-clock: unknown option ' + described.join(', ') +
+      '. Known options: ' + Object.keys(DEFAULTS).join(', ') + '.');
+  }
+
+  const cfg = Object.assign({}, DEFAULTS, given);
 
   // Accept snake_case and the older mode:'faux'|'real' spelling.
-  if (opts && opts.faux_fives !== undefined) cfg.fauxFives = !!opts.faux_fives;
-  if (opts && opts.mode !== undefined) cfg.fauxFives = (opts.mode === 'faux');
+  if (given.faux_fives !== undefined) cfg.fauxFives = !!given.faux_fives;
+  if (given.mode !== undefined) cfg.fauxFives = (given.mode === 'faux');
 
   if (!(cfg.trMs > 0)) {
     throw new Error('scanner-clock: trMs must be a positive number');
   }
+  if (!(Number.isInteger(cfg.pulsesPerVolume) && cfg.pulsesPerVolume >= 1)) {
+    throw new Error('scanner-clock: pulsesPerVolume must be an integer >= 1');
+  }
+  if (!(Number.isInteger(cfg.dummyVolumes) && cfg.dummyVolumes >= 0)) {
+    throw new Error('scanner-clock: dummyVolumes must be an integer >= 0');
+  }
+  if (!ROUNDERS[cfg.rounding]) {
+    throw new Error("scanner-clock: rounding must be 'round', 'floor' or 'ceil'");
+  }
+
+  // guardMs scales with the TR unless it is given explicitly. A fixed 500ms
+  // default would be illegal for any TR at or below 500ms — a short-TR multiband
+  // sequence would fail to construct.
+  if (cfg.guardMs == null) cfg.guardMs = Math.min(500, cfg.trMs / 2);
   if (!(cfg.guardMs >= 0)) {
     throw new Error('scanner-clock: guardMs must be zero or positive');
   }
   if (cfg.guardMs >= cfg.trMs) {
-    throw new Error('scanner-clock: guardMs must be smaller than trMs');
+    throw new Error('scanner-clock: guardMs (' + cfg.guardMs + ') must be smaller ' +
+      'than trMs (' + cfg.trMs + '); omit it to scale it with the TR');
   }
 
   // fauxFives defaults to FALSE deliberately. The two ways to get it wrong are
@@ -111,9 +178,11 @@ function create(opts) {
   const target = cfg.target || (typeof globalThis !== 'undefined' ? globalThis.window : null);
   const doc = cfg.doc || (typeof globalThis !== 'undefined' ? globalThis.document : null);
 
-  let count = 0;
+  let count = 0;        // volumes
+  let rawCount = 0;     // pulses; equals count unless pulsesPerVolume > 1
   let waiters = [];
   let timer = null;
+  let watchdog = null;
   let destroyed = false;
 
   let realPulses = 0;
@@ -142,6 +211,17 @@ function create(opts) {
     }
   }
 
+  /** Operator-facing warning: goes to onWarn (default console.error) AND the log. */
+  function warn(message, event, data) {
+    const payload = Object.assign({ message }, data || {});
+    if (typeof cfg.onWarn === 'function') {
+      try { cfg.onWarn(message, event, payload); } catch (e) { console.warn(e); }
+    } else {
+      console.error(message);
+    }
+    emit(event, payload);
+  }
+
   /** Subscribe to a log event ('*' for all). Returns an unsubscribe function. */
   function on(event, fn) {
     if (typeof fn !== 'function') throw new TypeError('scanner-clock: on(event, fn) needs a function');
@@ -158,15 +238,49 @@ function create(opts) {
   }
 
   function onPulse(source) {
-    count++;
-    if (cfg.logPulses) emit('pulse', { volume: count, source: source || 'unknown' });
-    if (!waiters.length) return count;
-    const due = waiters.filter(w => count >= w.target);
-    if (due.length) {
-      waiters = waiters.filter(w => count < w.target);
-      for (const w of due) { settle(w); w.resolve(count); }
+    rawCount++;
+    // With pulsesPerVolume > 1 the sequence pulses per slice (or per echo), so
+    // only every Nth pulse closes a volume. Everything downstream — waiters,
+    // hold(), the log — still speaks in volumes.
+    const closesVolume = (rawCount % cfg.pulsesPerVolume) === 0;
+    if (closesVolume) count++;
+    if (cfg.logPulses) {
+      emit('pulse', {
+        volume: count, pulse: rawCount, closesVolume, source: source || 'unknown',
+      });
     }
+    if (!closesVolume) { armWatchdog(); return count; }
+
+    if (waiters.length) {
+      const due = waiters.filter(w => count >= w.target);
+      if (due.length) {
+        waiters = waiters.filter(w => count < w.target);
+        for (const w of due) { settle(w); w.resolve(count); }
+      }
+    }
+    armWatchdog();
     return count;
+  }
+
+  // A run that stalls because no trigger is arriving looks exactly like a run
+  // that is waiting correctly. This is the only way to tell them apart from
+  // inside the task, so it warns the operator rather than failing the run.
+  function disarmWatchdog() {
+    if (watchdog != null) { clearTimeout(watchdog); watchdog = null; }
+  }
+
+  function armWatchdog() {
+    disarmWatchdog();
+    if (!(cfg.pulseTimeoutMs > 0) || destroyed || !waiters.length) return;
+    watchdog = setTimeout(() => {
+      watchdog = null;
+      warn('scanner-clock: no "' + primaryKey + '" pulse for ' + cfg.pulseTimeoutMs +
+           'ms while the task is waiting at volume ' + count + '. Is the trigger ' +
+           'connected, and has the scan started?',
+           'pulse_timeout', { volume: count, pendingWaits: waiters.length, sinceMs: cfg.pulseTimeoutMs });
+      armWatchdog();   // keep reminding until a pulse arrives or the wait ends
+    }, cfg.pulseTimeoutMs);
+    if (typeof watchdog === 'object' && typeof watchdog.unref === 'function') watchdog.unref();
   }
 
   /**
@@ -200,11 +314,10 @@ function create(opts) {
 
     if (cfg.fauxFives && trusted && !warnedDoubleClock) {
       warnedDoubleClock = true;
-      const msg = 'scanner-clock: real "' + e.key + '" pulses detected while ' +
-                  'fauxFives is ON — the clock is counting both and timing will ' +
-                  'be roughly twice as fast. Set fauxFives:false in the scanner.';
-      console.error(msg);
-      emit('double_clock_warning', { realPulses, fauxPulses, key: e.key });
+      warn('scanner-clock: real "' + e.key + '" pulses detected while fauxFives ' +
+           'is ON — the clock is counting both and timing will be roughly twice ' +
+           'as fast. Set fauxFives:false in the scanner.',
+           'double_clock_warning', { realPulses, fauxPulses, key: e.key });
     }
 
     onPulse(trusted ? 'real' : 'faux');
@@ -248,22 +361,51 @@ function create(opts) {
         signal.addEventListener('abort', w.onAbort, { once: true });
       }
       waiters.push(w);
+      armWatchdog();
     });
   }
 
   /**
-   * Resolve after `n` further pulses. Pure counting — immune to setTimeout
-   * throttling, unlike hold(). Use it if you expect the tab to be backgrounded.
+   * Resolve after `n` further VOLUMES (not raw pulses, when pulsesPerVolume > 1).
+   * Pure counting — immune to setTimeout throttling, unlike hold(). Use it if
+   * you expect the tab to be backgrounded.
    */
   function awaitTriggers(n, signal) {
     if (!(n > 0)) return Promise.resolve(count);
     return awaitCount(count + n, signal);
   }
 
-  // Hold for targetMs, ending on a pulse.
+  // A duration only means something in whole volumes. Converting is where a
+  // schedule written for one TR quietly becomes wrong under another, so the
+  // conversion is one function: it honours `rounding`, and it says so when the
+  // requested duration was not a whole number of volumes.
+  function toVolumes(ms, label) {
+    const value = ms || 0;
+    const volumes = ROUNDERS[cfg.rounding](value / cfg.trMs);
+    // deltaMs is actual minus requested: +500 means the screen runs 500ms LONGER
+    // than the schedule asked for.
+    const deltaMs = volumes * cfg.trMs - value;
+    if (Math.abs(deltaMs) > 1) {
+      const detail = value + 'ms is not a whole number of ' + cfg.trMs + 'ms volumes' +
+        (label ? ' (' + label + ')' : '') + '; ' + cfg.rounding + 'ed to ' + volumes +
+        ' volume' + (volumes === 1 ? '' : 's') + ' (' + (deltaMs > 0 ? '+' : '-') +
+        Math.abs(deltaMs).toFixed(0) + 'ms).';
+      if (cfg.strictDurations) throw new Error('scanner-clock: ' + detail);
+      emit('duration_rounded', {
+        targetMs: value, volumes, deltaMs, trMs: cfg.trMs, rounding: cfg.rounding, label,
+      });
+    }
+    return volumes;
+  }
+
+  function holdOpts(optsOrFn) {
+    return typeof optsOrFn === 'function' ? { onWaitStart: optsOrFn } : (optsOrFn || {});
+  }
+
+  // Hold for `volumes` volumes, ending on the pulse that completes the last one.
   //
   // The sleep is only an OPTIMISATION; the volume count is the authority. We
-  // wait until the count reaches (start + targetMs/TR), so:
+  // wait until the count reaches (start + volumes), so:
   //   - if the sleep was accurate, the remaining ~guardMs is spent waiting for
   //     that pulse, and the screen ends exactly on it;
   //   - if the sleep OVERSHOT the pulse, the count target is already met and
@@ -278,18 +420,14 @@ function create(opts) {
   // `onWaitStart` (optional) fires just before the trailing wait — use it to
   // log the wait as its own row, whose duration reads out the phase offset
   // between your schedule and the scanner (expect ~guardMs).
-  async function hold(targetMs, optsOrFn) {
-    const o = typeof optsOrFn === 'function' ? { onWaitStart: optsOrFn } : (optsOrFn || {});
+  async function holdCore(volumes, leadMs, o, targetMs) {
     const t0 = Date.now();
     const startCount = count;
-    const ms = targetMs || 0;
-    const volumes = Math.round(ms / cfg.trMs);
-    const lead = Math.max(0, ms - cfg.guardMs);
-    if (lead > 0) await sleep(lead);
+    if (leadMs > 0) await sleep(leadMs);
     if (typeof o.onWaitStart === 'function') o.onWaitStart(count);
     await awaitCount(startCount + volumes, o.signal);
     emit('hold_end', {
-      targetMs: ms,
+      targetMs,
       volumes,
       startVolume: startCount,
       endVolume: count,
@@ -297,6 +435,26 @@ function create(opts) {
       label: o.label,
     });
     return count;
+  }
+
+  /** Hold for targetMs, rounded to whole volumes, ending on a pulse. */
+  async function hold(targetMs, optsOrFn) {
+    const o = holdOpts(optsOrFn);
+    const ms = targetMs || 0;
+    const volumes = toVolumes(ms, o.label);
+    return holdCore(volumes, Math.max(0, ms - cfg.guardMs), o, ms);
+  }
+
+  /**
+   * Hold for an exact number of volumes. Equivalent to hold(n * trMs), but it
+   * cannot be rounded, and it is what you want when your design is specified in
+   * volumes rather than seconds.
+   */
+  async function holdVolumes(n, optsOrFn) {
+    const o = holdOpts(optsOrFn);
+    const volumes = Math.max(0, Math.round(n || 0));
+    const ms = volumes * cfg.trMs;
+    return holdCore(volumes, Math.max(0, ms - cfg.guardMs), o, ms);
   }
 
   /**
@@ -304,33 +462,24 @@ function create(opts) {
    * For windows whose start is fixed while their contents are self-paced.
    */
   async function holdUntil(deadlineMs, optsOrFn) {
-    const o = typeof optsOrFn === 'function' ? { onWaitStart: optsOrFn } : (optsOrFn || {});
-    const t0 = Date.now();
-    const startCount = count;
+    const o = holdOpts(optsOrFn);
     const remaining = Math.max(0, deadlineMs - Date.now());
-    const volumes = Math.round(remaining / cfg.trMs);
+    const volumes = toVolumes(remaining, o.label);
     const lead = Math.max(0, deadlineMs - cfg.guardMs - Date.now());
-    if (lead > 0) await sleep(lead);
-    if (typeof o.onWaitStart === 'function') o.onWaitStart(count);
-    await awaitCount(startCount + volumes, o.signal);
-    emit('hold_end', {
-      targetMs: remaining,
-      volumes,
-      startVolume: startCount,
-      endVolume: count,
-      elapsedMs: Date.now() - t0,
-      label: o.label,
-    });
-    return count;
+    return holdCore(volumes, lead, o, remaining);
   }
 
   /**
-   * Hold until the next pulse, so a run begins on a known volume. In the
-   * scanner this also means the task simply waits if the scan has not begun.
+   * Hold until the run can begin, so it starts on a known volume: one pulse,
+   * plus any dummy (steady-state) volumes your sequence sends before the data
+   * you keep. In the scanner this also means the task simply waits if the scan
+   * has not begun.
    */
   async function awaitRunStart(meta) {
-    await awaitTriggers(1);
-    emit('run_start', Object.assign({ volume: count }, meta || {}));
+    const m = meta || {};
+    const dummies = m.dummyVolumes != null ? m.dummyVolumes : cfg.dummyVolumes;
+    await awaitTriggers(1 + dummies);
+    emit('run_start', Object.assign({ volume: count, dummyVolumes: dummies }, m));
     return count;
   }
 
@@ -390,6 +539,7 @@ function create(opts) {
     if (destroyed) return;
     destroyed = true;
     stop();
+    disarmWatchdog();
     if (target && typeof target.removeEventListener === 'function') {
       target.removeEventListener('keydown', onKeyDown, { capture: true });
     }
@@ -412,8 +562,12 @@ function create(opts) {
     return {
       version: VERSION,
       volume: count,
+      pulses: rawCount,
       trMs: cfg.trMs,
       guardMs: cfg.guardMs,
+      pulsesPerVolume: cfg.pulsesPerVolume,
+      dummyVolumes: cfg.dummyVolumes,
+      rounding: cfg.rounding,
       key: keys.slice(),
       fauxFives: cfg.fauxFives,
       realPulses,
@@ -438,15 +592,18 @@ function create(opts) {
     get fauxPulses() { return fauxPulses; },
     get manualPulses() { return manualPulses; },
     get hiddenMs() { return hiddenMs + (hiddenSince != null ? Date.now() - hiddenSince : 0); },
+    get rawPulses() { return rawCount; },
     get trMs() { return cfg.trMs; },
     get guardMs() { return cfg.guardMs; },
+    get pulsesPerVolume() { return cfg.pulsesPerVolume; },
+    get dummyVolumes() { return cfg.dummyVolumes; },
     get key() { return keys.slice(); },
     get running() { return timer != null; },
     get destroyed() { return destroyed; },
-    msToVolumes: ms => Math.round((ms || 0) / cfg.trMs),
+    msToVolumes: ms => ROUNDERS[cfg.rounding]((ms || 0) / cfg.trMs),
     volumesToMs: n => (n || 0) * cfg.trMs,
     start, stop, destroy, pulse, on, snapshot,
-    hold, holdUntil,
+    hold, holdVolumes, holdUntil,
     awaitTriggers, awaitCount, awaitRunStart,
   };
 

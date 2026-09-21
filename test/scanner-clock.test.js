@@ -15,9 +15,50 @@ const mk = (opts = {}) => {
 };
 
 test('config validation', async t => {
-  await t.test('guardMs must be smaller than trMs', () => {
+  await t.test('an explicit guardMs must be smaller than trMs', () => {
     assert.throws(() => create({ trMs: 1000, guardMs: 1000, target: null, doc: null }),
-      /guardMs must be smaller than trMs/);
+      /guardMs \(1000\) must be smaller than trMs \(1000\)/);
+  });
+
+  await t.test('the default guardMs scales with the TR', () => {
+    // A fixed 500ms default would make every TR at or below 500ms unusable.
+    const cases = [[3000, 500], [1000, 500], [800, 400], [400, 200], [100, 50]];
+    for (const [trMs, expected] of cases) {
+      const c = create({ trMs, target: null, doc: null });
+      assert.equal(c.guardMs, expected, `TR ${trMs}`);
+      assert.ok(c.guardMs < c.trMs);
+      c.destroy();
+    }
+  });
+
+  await t.test('an explicit guardMs still wins', () => {
+    const c = create({ trMs: 2000, guardMs: 100, target: null, doc: null });
+    assert.equal(c.guardMs, 100);
+    c.destroy();
+  });
+
+  await t.test('unknown options are rejected, not ignored', () => {
+    // A typo here would otherwise leave the task on the 1000ms default while
+    // the scanner ran at a different TR, with nothing looking wrong.
+    assert.throws(() => create({ trMS: 2000, target: null, doc: null }),
+      /unknown option "trMS" \(did you mean "trMs"\?\)/);
+    assert.throws(() => create({ tr: 2, target: null, doc: null }),
+      /did you mean "trMs"/);
+    assert.throws(() => create({ triggerKey: '5', target: null, doc: null }),
+      /did you mean "key"/);
+    assert.throws(() => create({ nonsense: 1, target: null, doc: null }),
+      /unknown option "nonsense"\. Known options:/);
+  });
+
+  await t.test('pulsesPerVolume and dummyVolumes must be sane integers', () => {
+    assert.throws(() => create({ pulsesPerVolume: 0, target: null, doc: null }),
+      /pulsesPerVolume must be an integer >= 1/);
+    assert.throws(() => create({ pulsesPerVolume: 1.5, target: null, doc: null }),
+      /pulsesPerVolume must be an integer >= 1/);
+    assert.throws(() => create({ dummyVolumes: -1, target: null, doc: null }),
+      /dummyVolumes must be an integer >= 0/);
+    assert.throws(() => create({ rounding: 'nearest', target: null, doc: null }),
+      /rounding must be/);
   });
 
   await t.test('trMs must be positive', () => {
@@ -455,6 +496,218 @@ test('teardown', async t => {
     clock.destroy();
     clock.destroy();
     assert.equal(clock.destroyed, true);
+  });
+});
+
+test('non-1s TRs', async t => {
+  // These use short, deliberately un-round TRs: the point is that no code path
+  // is special-cased to 1000ms, and a short TR keeps the suite fast.
+  await t.test('holds scale with whatever TR was given', async () => {
+    for (const trMs of [17, 43, 130]) {
+      const env = makeEnv();
+      const clock = create({ trMs, target: env.win, doc: env.doc });
+      const p = clock.hold(trMs * 3);
+      env.pulses(3);
+      await p;
+      assert.equal(clock.count, 3, `TR ${trMs}`);
+      clock.destroy();
+    }
+  });
+
+  await t.test('holdVolumes says it in volumes and cannot be rounded', async () => {
+    const { pulses, clock } = mk({ trMs: 43, guardMs: 10 });
+    const p = clock.holdVolumes(2);
+    pulses(2);
+    await p;
+    assert.equal(clock.count, 2);
+    clock.destroy();
+  });
+
+  await t.test('msToVolumes follows the TR and the rounding policy', () => {
+    const round = create({ trMs: 1300, target: null, doc: null });
+    const floor = create({ trMs: 1300, rounding: 'floor', target: null, doc: null });
+    const ceil = create({ trMs: 1300, rounding: 'ceil', target: null, doc: null });
+    assert.equal(round.msToVolumes(2000), 2);   // 1.54 -> 2
+    assert.equal(floor.msToVolumes(2000), 1);
+    assert.equal(ceil.msToVolumes(2000), 2);
+    assert.equal(round.volumesToMs(3), 3900);
+    for (const c of [round, floor, ceil]) c.destroy();
+  });
+});
+
+test('duration rounding', async t => {
+  await t.test('a non-multiple duration is reported, not silently rounded', async () => {
+    const events = [];
+    const { pulses, clock } = mk({ trMs: 100, guardMs: 10, onLog: (e, d) => events.push([e, d]) });
+    const p = clock.hold(150, { label: 'iti' });
+    pulses(2);
+    await p;
+    const hit = events.find(([e]) => e === 'duration_rounded');
+    assert.ok(hit, 'emitted duration_rounded');
+    assert.equal(hit[1].volumes, 2);
+    assert.equal(hit[1].deltaMs, 50, 'actual is 50ms longer than requested');
+    assert.equal(hit[1].label, 'iti');
+    clock.destroy();
+  });
+
+  await t.test('an exact multiple says nothing', async () => {
+    const events = [];
+    const { pulses, clock } = mk({ trMs: 100, guardMs: 10, onLog: (e, d) => events.push([e, d]) });
+    const p = clock.hold(200);
+    pulses(2);
+    await p;
+    assert.equal(events.filter(([e]) => e === 'duration_rounded').length, 0);
+    clock.destroy();
+  });
+
+  await t.test('strictDurations turns it into a rejection', async () => {
+    const { clock } = mk({ trMs: 100, guardMs: 10, strictDurations: true });
+    await assert.rejects(clock.hold(150), /not a whole number of 100ms volumes/);
+    clock.destroy();
+  });
+
+  await t.test('holdVolumes is exempt — it is already in volumes', async () => {
+    const events = [];
+    const { pulses, clock } = mk({ trMs: 43, guardMs: 10, strictDurations: true, onLog: (e, d) => events.push([e, d]) });
+    const p = clock.holdVolumes(1);
+    pulses(1);
+    await p;
+    assert.equal(events.filter(([e]) => e === 'duration_rounded').length, 0);
+    clock.destroy();
+  });
+});
+
+test('pulsesPerVolume (slice or echo triggers)', async t => {
+  await t.test('only every Nth pulse closes a volume', () => {
+    const { pulses, clock } = mk({ pulsesPerVolume: 4 });
+    pulses(3);
+    assert.equal(clock.count, 0, 'mid-volume');
+    assert.equal(clock.rawPulses, 3);
+    pulses(1);
+    assert.equal(clock.count, 1);
+    pulses(8);
+    assert.equal(clock.count, 3);
+    assert.equal(clock.rawPulses, 12);
+    clock.destroy();
+  });
+
+  await t.test('holds still count volumes, not pulses', async () => {
+    const { pulses, clock } = mk({ pulsesPerVolume: 3 });
+    const p = clock.hold(TR * 2);
+    pulses(5);
+    await tick(TR);
+    assert.equal(clock.count, 1, 'not there yet');
+    pulses(1);
+    await p;
+    assert.equal(clock.count, 2);
+    assert.equal(clock.rawPulses, 6);
+    clock.destroy();
+  });
+
+  await t.test('snapshot reports both', () => {
+    const { pulses, clock } = mk({ pulsesPerVolume: 2 });
+    pulses(5);
+    const s = clock.snapshot();
+    assert.equal(s.volume, 2);
+    assert.equal(s.pulses, 5);
+    assert.equal(s.pulsesPerVolume, 2);
+    clock.destroy();
+  });
+});
+
+test('dummy volumes', async t => {
+  await t.test('awaitRunStart waits them out', async () => {
+    const events = [];
+    const { pulses, clock } = mk({ dummyVolumes: 4, onLog: (e, d) => events.push([e, d]) });
+    let started = false;
+    const p = clock.awaitRunStart({ run: 'main' }).then(() => { started = true; });
+    pulses(4);
+    await tick(0);
+    assert.equal(started, false, 'still discarding dummies');
+    pulses(1);
+    await p;
+    assert.equal(clock.count, 5, '1 + 4 dummies');
+    const [, data] = events.find(([e]) => e === 'run_start');
+    assert.equal(data.dummyVolumes, 4);
+    assert.equal(data.volume, 5);
+    clock.destroy();
+  });
+
+  await t.test('a per-call override beats the default', async () => {
+    const { pulses, clock } = mk({ dummyVolumes: 4 });
+    const p = clock.awaitRunStart({ dummyVolumes: 0 });
+    pulses(1);
+    await p;
+    assert.equal(clock.count, 1);
+    clock.destroy();
+  });
+
+  await t.test('zero dummies is the default and costs one pulse', async () => {
+    const { pulses, clock } = mk();
+    const p = clock.awaitRunStart();
+    pulses(1);
+    await p;
+    assert.equal(clock.count, 1);
+    clock.destroy();
+  });
+});
+
+test('pulse timeout watchdog', async t => {
+  await t.test('warns while a wait sees no pulses', async () => {
+    const warnings = [];
+    const { pulses, clock } = mk({ pulseTimeoutMs: 30, onWarn: (m, e, d) => warnings.push([m, e, d]) });
+    const p = clock.awaitTriggers(1);
+    await tick(80);
+    assert.ok(warnings.length >= 2, `re-warns until a pulse arrives (${warnings.length})`);
+    assert.match(warnings[0][0], /no "5" pulse for 30ms/);
+    assert.equal(warnings[0][1], 'pulse_timeout');
+    pulses(1);
+    await p;
+    const after = warnings.length;
+    await tick(80);
+    assert.equal(warnings.length, after, 'silent once nothing is waiting');
+    clock.destroy();
+  });
+
+  await t.test('stays silent when pulses keep arriving', async () => {
+    const warnings = [];
+    const { win, clock } = mk({ pulseTimeoutMs: 60, onWarn: (m) => warnings.push(m) });
+    const iv = setInterval(() => win.dispatchEvent(realKey('5')), TR);
+    try {
+      await clock.awaitTriggers(5);
+      assert.equal(warnings.length, 0);
+    } finally {
+      clearInterval(iv);
+      clock.destroy();
+    }
+  });
+
+  await t.test('is off by default', async () => {
+    const warnings = [];
+    const { clock } = mk({ onWarn: (m) => warnings.push(m) });
+    clock.awaitTriggers(1).catch(() => {});
+    await tick(60);
+    assert.equal(warnings.length, 0);
+    clock.destroy();
+  });
+});
+
+test('onWarn sink', async t => {
+  await t.test('redirects the double-clock warning away from console', () => {
+    const warnings = [];
+    const { win, clock } = mk({ fauxFives: true, onWarn: (m, e, d) => warnings.push([m, e, d]) });
+    const errors = [];
+    const realError = console.error;
+    console.error = m => errors.push(m);
+    try {
+      win.dispatchEvent(realKey('5'));
+    } finally {
+      console.error = realError;
+    }
+    assert.equal(errors.length, 0, 'console left alone when onWarn is given');
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0][1], 'double_clock_warning');
+    clock.destroy();
   });
 });
 

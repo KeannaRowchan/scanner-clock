@@ -96,12 +96,11 @@
 
   function build() {
     if (clock) clock.destroy({ settle: 'resolve' });
-    var trMs = Number(document.getElementById('tr').value) || 1000;
     clock = ScannerClock.create({
-      trMs: trMs,
-      // guardMs must be smaller than the TR; scale it so the demo's TR slider
+      trMs: Number(document.getElementById('tr').value) || 1000,
+      // No guardMs here: it defaults to min(500, trMs / 2), so the TR box
       // cannot produce an invalid pair.
-      guardMs: Math.min(500, Math.round(trMs * 0.3)),
+      pulseTimeoutMs: 8000,
       fauxFives: document.getElementById('faux').checked,
       logPulses: true,
       onLog: function (event, data) {
