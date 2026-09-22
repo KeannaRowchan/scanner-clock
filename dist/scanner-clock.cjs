@@ -63,7 +63,7 @@ const DEFAULTS = {
   // --- the scanner ---------------------------------------------------------
   trMs: 1000,             // ms per volume. NOTHING else assumes 1s.
   trSec: null,            // the same thing in seconds; give one or the other
-  trStepMs: 500,          // TR granularity: whole or half seconds. 0 = anything.
+  trStepMs: 100,          // TR granularity: tenths of a second. 0 = anything.
   key: '5',               // key, or array of keys, the scanner sends
   pulsesPerVolume: 1,     // raise it if your sequence pulses per slice or echo
   dummyVolumes: 0,        // volumes awaitRunStart() waits out before the run
@@ -77,6 +77,7 @@ const DEFAULTS = {
   // --- piloting ------------------------------------------------------------
   fauxFives: false,       // true = generate pulses locally; false = real only
   autoStart: false,       // call start() during create()
+  spinMs: 0,              // busy-wait the last N ms of each TR for a sub-ms landing
 
   // --- plumbing ------------------------------------------------------------
   onLog: null,            // (event, data) => void
@@ -97,9 +98,10 @@ const nowMs = () =>
 /**
  * The TR comes off a protocol printout, and it is the one number that makes
  * every other number in the task wrong if it is entered wrong. So it is checked
- * against a granularity: whole or half seconds by default, matching how TRs are
- * actually prescribed. Set trStepMs: 0 (or 100, or whatever) if your sequence
- * genuinely runs at something else.
+ * against a granularity: tenths of a second by default, which covers how TRs
+ * are actually prescribed (2.4s multiband, 0.8s, 1.5s) while still catching a
+ * fat-fingered 2.45. Set trStepMs: 0 if your sequence genuinely runs at
+ * something else.
  */
 function resolveTrMs(given) {
   const hasMs = given.trMs !== undefined && given.trMs !== null;
@@ -137,12 +139,20 @@ function resolveTrMs(given) {
     throw new Error('scanner-clock: trStepMs must be zero or positive');
   }
 
-  if (step > 0 && Math.abs(trMs / step - Math.round(trMs / step)) > 1e-9) {
-    const low = Math.floor(trMs / step) * step;
-    const high = low + step;
-    throw new Error('scanner-clock: a TR of ' + (trMs / 1000) + 's is not a multiple of ' +
-      (step / 1000) + 's. Nearest allowed: ' + (low / 1000) + 's or ' + (high / 1000) +
-      's. Set trStepMs if your sequence really runs at ' + (trMs / 1000) + 's.');
+  if (step > 0) {
+    const steps = trMs / step;
+    // 2.4 * 1000 is 2400.0000000000005, so compare with a tolerance rather than
+    // an exact remainder.
+    if (Math.abs(steps - Math.round(steps)) > 1e-9) {
+      const low = Math.floor(steps) * step;
+      const high = low + step;
+      throw new Error('scanner-clock: a TR of ' + (trMs / 1000) + 's is not a multiple of ' +
+        (step / 1000) + 's. Nearest allowed: ' + (low / 1000) + 's or ' + (high / 1000) +
+        's. Set trStepMs if your sequence really runs at ' + (trMs / 1000) + 's.');
+    }
+    // Snap away that same float error, so the TR that schedules pulses and the
+    // TR that appears in the log are both exactly the number that was asked for.
+    trMs = Math.round(steps) * step;
   }
   return trMs;
 }
@@ -202,8 +212,17 @@ function makeKeyEvent(key) {
  * scanner does to a busy task: it keeps pulsing, and the browser delivers the
  * queued keydowns late and in a burst. A faux generator that quietly skipped
  * them would make a pilot run look better than the scanner run it stands in for.
+ *
+ * setTimeout fires at its delay OR LATER — typically 1-2ms later, and that is
+ * the floor on how exactly a pulse can land. spinMs trades CPU for precision:
+ * the timeout is set to wake that many ms early and the remainder is burned in
+ * a busy loop, which lands the pulse within the clock's own resolution (~0.1ms)
+ * at the cost of pegging a core for those few ms per TR. Off by default,
+ * because 1-2ms is already well inside the jitter of a real trigger reaching
+ * the browser, and a busy loop is a rude thing to do to a task that is trying
+ * to render.
  */
-function makeTicker(trMs, onTick) {
+function makeTicker(trMs, onTick, spinMs) {
   const t0 = nowMs();
   let ticks = 0;
   let handle = null;
@@ -211,9 +230,11 @@ function makeTicker(trMs, onTick) {
   let lastDriftMs = 0;
   let maxAbsDriftMs = 0;
 
+  const spin = spinMs > 0 ? Math.min(spinMs, trMs / 2) : 0;
+
   function schedule() {
     if (stopped) return;
-    handle = setTimeout(fire, Math.max(0, t0 + (ticks + 1) * trMs - nowMs()));
+    handle = setTimeout(fire, Math.max(0, t0 + (ticks + 1) * trMs - spin - nowMs()));
     if (typeof handle === 'object' && handle !== null && typeof handle.unref === 'function') {
       handle.unref();
     }
@@ -221,6 +242,14 @@ function makeTicker(trMs, onTick) {
 
   function fire() {
     if (stopped) return;
+    if (spin > 0) {
+      // Burn the last few ms rather than hand them back to a timer that would
+      // return them late. Bounded by the spin window, so a clock jump or a
+      // delayed wake-up cannot turn this into a long freeze.
+      const target = t0 + (ticks + 1) * trMs;
+      const giveUpAt = nowMs() + spin + 2;
+      while (!stopped && nowMs() < target && nowMs() < giveUpAt) { /* spin */ }
+    }
     const due = Math.max(1, Math.floor((nowMs() - t0) / trMs) - ticks);
     for (let i = 0; i < due && !stopped; i++) {
       ticks++;
@@ -284,6 +313,9 @@ function create(opts) {
   }
   if (!ROUNDERS[cfg.rounding]) {
     throw new Error("scanner-clock: rounding must be 'round', 'floor' or 'ceil'");
+  }
+  if (!(cfg.spinMs >= 0) || cfg.spinMs >= cfg.trMs) {
+    throw new Error('scanner-clock: spinMs must be zero or positive and smaller than trMs');
   }
 
   // guardMs scales with the TR unless it is given explicitly. A fixed 500ms
@@ -639,8 +671,10 @@ function create(opts) {
         fauxPulses++;
         onPulse('faux');
       }
+    }, cfg.spinMs);
+    emit('faux_scanner_started', {
+      trMs: cfg.trMs, trSec: cfg.trMs / 1000, key: primaryKey, spinMs: cfg.spinMs,
     });
-    emit('faux_scanner_started', { trMs: cfg.trMs, trSec: cfg.trMs / 1000, key: primaryKey });
     return true;
   }
 
@@ -744,6 +778,9 @@ function create(opts) {
  *   const scanner = simulate(2);     // a "5" keydown every 2s, forever
  *   scanner.stop();
  *
+ * Pulses land within ~0.001ms of the schedule (see spinMs). Read the accuracy
+ * you actually got off scanner.maxAbsDriftMs rather than taking that on trust.
+ *
  * This is a stand-in for the scanner, not a clock: it drives ANY task that
  * listens for the trigger key, whether or not that task uses this module. Use
  * it to pilot a task on the desk, or to check that a task reacts to triggers at
@@ -761,7 +798,9 @@ function simulate(trSec, opts) {
     opts || {}
   );
 
-  const known = new Set(['trSec', 'trMs', 'trStepMs', 'key', 'target', 'onPulse', 'autoStart']);
+  const known = new Set([
+    'trSec', 'trMs', 'trStepMs', 'key', 'target', 'onPulse', 'autoStart', 'spinMs',
+  ]);
   const unknown = Object.keys(given).filter(k => !known.has(k) && given[k] !== undefined);
   if (unknown.length) {
     throw new Error('scanner-clock: simulate() does not take ' +
@@ -779,6 +818,18 @@ function simulate(trSec, opts) {
     ? given.target
     : (typeof globalThis !== 'undefined' ? globalThis.window : null);
 
+  // simulate() exists to press the key at exactly the TR, so it spins by
+  // default: setTimeout alone lands ~1ms late, spinning lands within ~0.001ms.
+  // create()'s own generator does NOT default to this — it runs inside a task
+  // that is trying to render, and there the pulse COUNT is the authority
+  // anyway, so precision of the faux train buys nothing.
+  const spinMs = given.spinMs === undefined || given.spinMs === null
+    ? Math.min(2, trMs / 10)
+    : given.spinMs;
+  if (!(spinMs >= 0) || spinMs >= trMs) {
+    throw new Error('scanner-clock: spinMs must be zero or positive and smaller than trMs');
+  }
+
   let ticker = null;
 
   function start() {
@@ -790,7 +841,7 @@ function simulate(trSec, opts) {
       if (typeof given.onPulse === 'function') {
         given.onPulse({ pulse: n, burst, trMs, driftMs: ticker.driftMs });
       }
-    });
+    }, spinMs);
     return controller;
   }
 
@@ -807,6 +858,7 @@ function simulate(trSec, opts) {
     get trMs() { return trMs; },
     get trSec() { return trMs / 1000; },
     get key() { return key; },
+    get spinMs() { return spinMs; },
   };
 
   if (given.autoStart !== false) start();

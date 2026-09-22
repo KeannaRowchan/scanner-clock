@@ -12,9 +12,16 @@ First packaged release, extracted from a single-file `scanner-clock.js`.
 - `simulate(trSec)` — a one-line stand-in for the scanner that presses the
   trigger key at exactly the TR, usable in front of any task, including tasks
   that do not use this module.
-- `trSec` as an alternative to `trMs`, and `trStepMs` (default 500) constraining
-  the TR to whole or half seconds. Each unit is guarded against the other's
-  magnitude: `trMs: 2` and `trSec: 2000` are both rejected with the fix named.
+- `trSec` as an alternative to `trMs`, and `trStepMs` (default 100) constraining
+  the TR to tenths of a second — fine enough for multiband TRs like 2.4s or
+  0.8s, coarse enough to catch a fat-fingered 2.45. Each unit is guarded against
+  the other's magnitude: `trMs: 2` and `trSec: 2000` are both rejected with the
+  fix named. The stored TR is snapped to the granularity, so float error in
+  `trSec * 1000` never reaches the scheduler or the log.
+- `spinMs`, which busy-waits the last few ms of each TR instead of handing them
+  to a timer that returns them late. `simulate()` defaults it to 2ms, taking its
+  worst-case landing error from ~1.15ms to ~0.002ms; `create()`'s faux generator
+  leaves it off, since there the pulse count is the authority.
 - `pulsesPerVolume` for sequences that trigger per slice or per echo, with
   `rawPulses` alongside the volume count.
 - `dummyVolumes`, waited out by `awaitRunStart()` (overridable per run).

@@ -7,7 +7,7 @@ export interface ScannerClockOptions {
   trMs?: number;
   /** The TR in seconds instead — give this or `trMs`, not both. */
   trSec?: number;
-  /** TR granularity. Default 500: whole or half seconds only. 0 allows any TR. */
+  /** TR granularity. Default 100: tenths of a second. 0 allows any TR. */
   trStepMs?: number;
   /** Key, or keys, the scanner sends. Default '5'. */
   key?: string | string[];
@@ -35,6 +35,8 @@ export interface ScannerClockOptions {
   logPulses?: boolean;
   /** Call start() during create(). Default false. */
   autoStart?: boolean;
+  /** Busy-wait the last N ms of each TR so pulses land within ~0.001ms. Default 0. */
+  spinMs?: number;
   /** EventTarget to listen on. Default globalThis.window. */
   target?: EventTarget | null;
   /** Document used for visibility logging. Default globalThis.document. */
@@ -163,15 +165,19 @@ export interface ScannerSimulator {
   readonly trMs: number;
   readonly trSec: number;
   readonly key: string;
+  /** Busy-wait window in ms. Defaults to 2 for simulate(). */
+  readonly spinMs: number;
 }
 
 export interface SimulateOptions {
-  /** TR in seconds. Must be a whole or half second unless `trStepMs` says otherwise. */
+  /** TR in seconds. Must be a multiple of 0.1s unless `trStepMs` says otherwise. */
   trSec?: number;
   /** TR in milliseconds instead. */
   trMs?: number;
-  /** TR granularity. Default 500. */
+  /** TR granularity. Default 100. */
   trStepMs?: number;
+  /** Busy-wait the last N ms of each TR. Default 2 — pass 0 to opt out. */
+  spinMs?: number;
   /** Key to press. Default '5'. */
   key?: string | string[];
   /** EventTarget to dispatch on. Default globalThis.window. */

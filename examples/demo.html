@@ -55,14 +55,7 @@
     <button id="stop" disabled>Stop</button>
     <label><input type="checkbox" id="faux"> faux fives (local generator)</label>
     <label>TR
-      <select id="tr">
-        <option value="0.5">0.5 s</option>
-        <option value="1" selected>1 s</option>
-        <option value="1.5">1.5 s</option>
-        <option value="2">2 s</option>
-        <option value="2.5">2.5 s</option>
-        <option value="3">3 s</option>
-      </select>
+      <input type="number" id="tr" value="1" min="0.1" max="5" step="0.1" style="width:72px"> s
     </label>
   </div>
 
@@ -106,8 +99,7 @@
   function build() {
     if (clock) clock.destroy({ settle: 'resolve' });
     clock = ScannerClock.create({
-      // Whole or half seconds only — the TR box offers nothing else, and
-      // create() would reject it if it did.
+      // Tenths of a second; create() rejects anything finer.
       trSec: Number(document.getElementById('tr').value) || 1,
       // No guardMs here: it defaults to min(500, trMs / 2), so no TR on the
       // list can produce an invalid pair.

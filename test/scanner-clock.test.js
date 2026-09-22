@@ -716,26 +716,38 @@ test('onWarn sink', async t => {
 });
 
 test('TR granularity', async t => {
-  await t.test('whole and half seconds are accepted', () => {
-    for (const trSec of [0.5, 1, 1.5, 2, 2.5, 3]) {
+  await t.test('tenths of a second are accepted', () => {
+    // Including the multiband TRs that a coarser rule would have refused.
+    for (const trSec of [0.1, 0.4, 0.8, 1, 1.2, 1.5, 2, 2.4, 3]) {
       const c = create({ trSec, target: null, doc: null });
-      assert.equal(c.trMs, trSec * 1000);
+      assert.equal(c.trMs, Math.round(trSec * 1000), `TR ${trSec}s`);
       c.destroy();
     }
   });
 
-  await t.test('anything between them is rejected, with the nearest alternatives', () => {
-    assert.throws(() => create({ trSec: 2.4, target: null, doc: null }),
-      /a TR of 2\.4s is not a multiple of 0\.5s\. Nearest allowed: 2s or 2\.5s/);
-    assert.throws(() => create({ trMs: 1300, target: null, doc: null }),
-      /not a multiple of 0\.5s\. Nearest allowed: 1s or 1\.5s/);
-    assert.throws(() => create({ trMs: 750, target: null, doc: null }),
-      /Nearest allowed: 0\.5s or 1s/);
+  await t.test('finer than a tenth is rejected, with the nearest alternatives', () => {
+    assert.throws(() => create({ trSec: 2.45, target: null, doc: null }),
+      /a TR of 2\.45s is not a multiple of 0\.1s\. Nearest allowed: 2\.4s or 2\.5s/);
+    assert.throws(() => create({ trMs: 1350, target: null, doc: null }),
+      /not a multiple of 0\.1s\. Nearest allowed: 1\.3s or 1\.4s/);
+    assert.throws(() => create({ trMs: 999, target: null, doc: null }),
+      /Nearest allowed: 0\.9s or 1s/);
+  });
+
+  await t.test('the stored TR is exact, not a float artefact', () => {
+    // trSec * 1000 can land a few ulps off; the TR that schedules pulses and
+    // the TR that appears in the log must both be the number that was asked for.
+    for (const trSec of [0.1, 0.3, 0.7, 2.4]) {
+      const c = create({ trSec, target: null, doc: null });
+      assert.equal(c.trMs, Math.round(trSec * 1000));
+      assert.equal(c.snapshot().trMs % 100, 0);
+      c.destroy();
+    }
   });
 
   await t.test('trStepMs relaxes it for sequences that need it', () => {
-    const c = create({ trSec: 2.4, trStepMs: 100, target: null, doc: null });
-    assert.equal(c.trMs, 2400);
+    const c = create({ trSec: 2.45, trStepMs: 10, target: null, doc: null });
+    assert.equal(c.trMs, 2450);
     c.destroy();
     const any = create({ trMs: 1234, trStepMs: 0, target: null, doc: null });
     assert.equal(any.trMs, 1234);
@@ -818,11 +830,38 @@ test('simulate(trSec)', async t => {
   });
 
   await t.test('enforces the same TR granularity', () => {
-    assert.throws(() => simulate(2.4), /not a multiple of 0\.5s/);
+    assert.throws(() => simulate(2.45), /not a multiple of 0\.1s/);
     assert.throws(() => simulate(2000), /trSec is in SECONDS — 2000s is not a TR\. Did you mean trMs: 2000\?/);
-    const sim = simulate(0.5, { target: null });
-    assert.equal(sim.trMs, 500);
+    const sim = simulate(0.8, { target: null });
+    assert.equal(sim.trMs, 800);
     sim.stop();
+  });
+
+  await t.test('lands pulses within a millisecond of the schedule', async () => {
+    // The bound is deliberately loose: a loaded CI box is not a quiet desk.
+    // What is being checked is that the pulse train tracks an absolute
+    // schedule, not that any particular machine is fast.
+    const sim = simulate(0.1, { target: null });
+    assert.equal(sim.spinMs, 2, 'simulate() spins by default');
+    await tick(1000);
+    sim.stop();
+    assert.ok(sim.count >= 8, `~10 pulses in 1s (got ${sim.count})`);
+    assert.ok(sim.maxAbsDriftMs < 5, `worst drift ${sim.maxAbsDriftMs.toFixed(3)}ms`);
+  });
+
+  await t.test('spinMs: 0 opts out of the busy-wait', async () => {
+    const sim = simulate(0.1, { target: null, spinMs: 0 });
+    assert.equal(sim.spinMs, 0);
+    await tick(300);
+    sim.stop();
+    assert.ok(sim.count >= 2, `still pulsing (got ${sim.count})`);
+  });
+
+  await t.test('spinMs must fit inside the TR', () => {
+    assert.throws(() => simulate(0.1, { spinMs: 100, target: null }),
+      /spinMs must be zero or positive and smaller than trMs/);
+    assert.throws(() => create({ trSec: 1, spinMs: -1, target: null, doc: null }),
+      /spinMs must be zero or positive/);
   });
 
   await t.test('says what it needs when called wrong', () => {

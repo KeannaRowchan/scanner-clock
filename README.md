@@ -38,6 +38,7 @@ presses `5` at exactly that rate, for as long as you leave it running:
 import { simulate } from 'scanner-clock';
 
 const scanner = simulate(2);     // a "5" keydown every 2s
+const fast    = simulate(0.8);   // or 0.8s, or any tenth of a second
 scanner.stop();
 ```
 
@@ -45,24 +46,47 @@ It dispatches real `KeyboardEvent`s at the window, so it drives **any** task
 that listens for the trigger — including tasks that have never heard of this
 module. Put it in the console of a task you are piloting and watch it advance.
 
-`scanner.maxAbsDriftMs` is the number behind "exactly": the worst deviation
-between a pulse and where the schedule said it should be. It stays near 1 ms,
-because each pulse is timed against the run's start rather than against the
-previous pulse. `setInterval` cannot do that — measured over 4 s at a 100 ms
-interval with a 30 ms render on each pulse, `setInterval` delivered 39 of 40
-pulses and ran 103 ms late; this delivered all 40 with a 1.2 ms worst case.
+### How exactly is "exactly"?
 
-## The TR is whole or half seconds
+`scanner.maxAbsDriftMs` is the number behind the claim: the worst gap between a
+pulse and where the schedule said it should be. Don't take it on trust — read it
+off a run.
+
+Two things get it there. Each pulse is timed against the run's **start**, not
+against the previous pulse, so error cannot accumulate the way `setInterval`'s
+does. And the last 2 ms of each TR are spent in a busy loop rather than handed
+back to a timer that would return them late, because `setTimeout` fires at its
+delay *or later*. Measured at a 100 ms TR:
+
+| | pulses in 3 s | mean drift | worst |
+| --- | --- | --- | --- |
+| `setInterval` | 29 | — | — |
+| absolute schedule, `spinMs: 0` | 29 | 0.632 ms | 1.152 ms |
+| **default (`spinMs: 2`)** | **30** | **0.001 ms** | **0.002 ms** |
+
+In Chrome the same test reports `0.000 ms` with the spin on. That is not
+literally zero — it means the error is below what `performance.now()` will
+resolve there, which browsers deliberately coarsen to 100 µs. Measured at a
+0.4 s TR in Chrome: 7 pulses, 7 keydowns actually delivered, drift below the
+clock's own resolution; with `spinMs: 0`, 0.74 ms mean and 1.2 ms worst.
+
+Pass `spinMs: 0` to skip the busy-wait if you would rather not spend the CPU.
+`create()`'s own faux generator does *not* spin by default: it runs inside a
+task that is trying to render, and there the pulse **count** is the authority
+anyway, so a more precise faux train buys nothing.
+
+## The TR goes to a tenth of a second
 
 The TR is the one number that makes every other number in the task wrong if it
 is entered wrong, so it is checked rather than taken on faith:
 
 ```js
 create({ trSec: 2 });      // fine
-create({ trSec: 1.5 });    // fine
+create({ trSec: 2.4 });    // fine — multiband TRs work
+create({ trSec: 0.8 });    // fine
 create({ trMs: 2500 });    // fine — same thing in ms
-create({ trSec: 2.4 });    // throws: not a multiple of 0.5s.
-                           //         Nearest allowed: 2s or 2.5s
+create({ trSec: 2.45 });   // throws: not a multiple of 0.1s.
+                           //         Nearest allowed: 2.4s or 2.5s
 create({ trMs: 2 });       // throws: trMs is in MILLISECONDS.
                            //         Did you mean trSec: 2?
 create({ trSec: 2000 });   // throws: trSec is in SECONDS.
@@ -71,11 +95,10 @@ create({ trSec: 2000 });   // throws: trSec is in SECONDS.
 
 Each unit is guarded against the other's magnitude, because a TR entered in the
 wrong unit still produces a perfectly functional clock running at a wildly wrong
-rate. **If your sequence genuinely runs at something else** — a 2.4 s or 0.8 s
-multiband TR is common — set the granularity:
+rate. For anything finer than a tenth, set the granularity yourself:
 
 ```js
-create({ trSec: 2.4, trStepMs: 100 });   // or trStepMs: 0 for anything
+create({ trSec: 2.45, trStepMs: 10 });   // or trStepMs: 0 for anything
 ```
 
 ## Not a 1 s TR?
@@ -190,7 +213,7 @@ Anything not listed here is an error, not an ignored key.
 | --- | --- | --- |
 | `trMs` | `1000` | Milliseconds per volume. |
 | `trSec` | — | The TR in seconds instead. Give this or `trMs`, not both. |
-| `trStepMs` | `500` | TR granularity: whole or half seconds. `0` allows any TR. |
+| `trStepMs` | `100` | TR granularity: tenths of a second. `0` allows any TR. |
 | `key` | `'5'` | Key, or array of keys, the scanner sends. |
 | `pulsesPerVolume` | `1` | Raise it when the sequence pulses per slice or per echo. |
 | `dummyVolumes` | `0` | Steady-state volumes `awaitRunStart()` waits out. |
@@ -210,6 +233,7 @@ Anything not listed here is an error, not an ignored key.
 | --- | --- | --- |
 | `fauxFives` | `false` | Generate pulses locally. See above. |
 | `autoStart` | `false` | Call `start()` during `create()`. |
+| `spinMs` | `0` | Busy-wait the last N ms of each TR for a sub-ms landing. `simulate()` defaults this to `2`. |
 | `onLog` | `null` | `(event, data) => void` sink for every clock event. |
 | `onWarn` | `console.error` | `(message, event, data) => void` for operator-facing warnings. |
 | `ignoreTextEntry` | `true` | A `5` typed into an input/textarea is an answer, not a volume. |
@@ -322,7 +346,7 @@ replace the frame-count end condition with an `await clock.hold(...)`.
 ## Development
 
 ```bash
-npm test          # 97 tests, no dependencies, ~4 s
+npm test          # 101 tests, no dependencies, ~6 s
 npm run build     # regenerate dist/ from src/scanner-clock.js
 npm run check     # build + test, as CI runs it
 ```
