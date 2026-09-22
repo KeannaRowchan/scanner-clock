@@ -49,6 +49,10 @@ First packaged release, extracted from a single-file `scanner-clock.js`.
   delivered all 40 with a 1.2ms worst-case deviation.
 
 ### Fixed
+- The pulse timers are no longer `unref`'d. An unref'd timer does not hold
+  Node's event loop open, so a task awaiting faux pulses outside a browser
+  exited instead of advancing ("Promise resolution is still pending but the
+  event loop has already resolved"). Node 24+ masked it; 18, 20 and 22 did not.
 - `guardMs` now defaults to `min(500, trMs / 2)` instead of a flat `500`. The old
   default made `create()` throw for any TR at or below 500 ms, so a short-TR
   sequence could not be configured at all.

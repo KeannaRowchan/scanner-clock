@@ -232,10 +232,12 @@ function makeTicker(trMs, onTick, spinMs) {
 
   function schedule() {
     if (stopped) return;
+    // Deliberately NOT unref'd. An unref'd timer does not hold Node's event
+    // loop open, so a task awaiting pulses would exit instead of advancing
+    // ("Promise resolution is still pending but the event loop has already
+    // resolved"). Browsers have no such concept; stop() and destroy() are how
+    // you end the train.
     handle = setTimeout(fire, Math.max(0, t0 + (ticks + 1) * trMs - spin - nowMs()));
-    if (typeof handle === 'object' && handle !== null && typeof handle.unref === 'function') {
-      handle.unref();
-    }
   }
 
   function fire() {
@@ -446,7 +448,6 @@ function create(opts) {
            'pulse_timeout', { volume: count, pendingWaits: waiters.length, sinceMs: cfg.pulseTimeoutMs });
       armWatchdog();   // keep reminding until a pulse arrives or the wait ends
     }, cfg.pulseTimeoutMs);
-    if (typeof watchdog === 'object' && typeof watchdog.unref === 'function') watchdog.unref();
   }
 
   /**

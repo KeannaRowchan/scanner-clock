@@ -881,6 +881,28 @@ test('headless use (no DOM at all)', async t => {
     clock.destroy();
   });
 
+  // Regression: the generator's timer used to be unref'd, which does not hold
+  // Node's event loop open. A task awaiting pulses exited instead of advancing
+  // ("Promise resolution is still pending but the event loop has already
+  // resolved") on every Node before 24. Browsers have no such concept, so this
+  // only ever showed up off the browser — which is where CI runs.
+  await t.test('a pending wait keeps the process alive', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { fileURLToPath } = await import('node:url');
+    const src = fileURLToPath(new URL('../src/scanner-clock.js', import.meta.url));
+    const script = `
+      import { create } from ${JSON.stringify(src)};
+      const clock = create({ trMs: 30, trStepMs: 1, fauxFives: true, autoStart: true,
+                             target: null, doc: null });
+      await clock.awaitTriggers(3);
+      console.log('reached:' + clock.count);
+      clock.destroy();
+    `;
+    const out = execFileSync(process.execPath, ['--input-type=module', '--eval', script],
+      { encoding: 'utf8', timeout: 10000 });
+    assert.match(out, /reached:3/, 'the await resolved instead of the process exiting');
+  });
+
   await t.test('the faux generator still ticks without an event target', async () => {
     const clock = create({ trMs: TR, guardMs: GUARD, trStepMs: 1, fauxFives: true, target: null, doc: null });
     clock.start();
