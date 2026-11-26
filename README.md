@@ -129,6 +129,10 @@ create({
   the task at the 1000 ms default while the scanner runs at 2.4 s. Same
   reasoning as the `fauxFives` default below: the loud failure is the safe one.
 
+New to it, or pointing a labmate at it? **[HOWTOUSE.md](HOWTOUSE.md)** covers
+getting it into a task from another project, with no copying and no relative
+paths.
+
 ## Install
 
 ```bash
